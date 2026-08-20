@@ -142,14 +142,38 @@ pub fn observe(record: ConductRecord, evidence: ConductEvidence, now_ticks: u64)
 }
 
 /// Decay the transient penalty to `now_ticks`. Durable faults are untouched.
+///
+/// The stamp advances by the **whole decay periods actually consumed**, never to `now_ticks`, so the
+/// sub-period remainder is carried forward into the next call. Snapping the stamp to `now_ticks`
+/// would discard that remainder, and because [`observe`] decays first, every observation would reset
+/// the clock — a peer this node talks to more often than once per [`NON_PERFORMANCE_DECAY_TICKS`]
+/// would never shed its penalty at all.
+///
+/// That failure mode is not a rounding nuisance, it is SPEC §8.2A.1 inverted: an honest peer under
+/// transient distress is precisely the peer that keeps answering, so truncation penalises the exact
+/// population the clause exists to protect, and an attacker who can induce brief distress in a third
+/// party would make it permanent. **The penalty a peer carries MUST be a function of elapsed ticks
+/// alone, never of how often this node happened to observe it.**
 #[must_use]
 pub fn decay(record: ConductRecord, now_ticks: u64) -> ConductRecord {
     let elapsed = now_ticks.saturating_sub(record.last_update_ticks);
-    let decayed = u32::try_from(elapsed / NON_PERFORMANCE_DECAY_TICKS).unwrap_or(u32::MAX);
+    let periods = elapsed / NON_PERFORMANCE_DECAY_TICKS;
+    let decayed = u32::try_from(periods).unwrap_or(u32::MAX);
+    let non_performance = record.non_performance.saturating_sub(decayed);
+
     ConductRecord {
         proven_faults: record.proven_faults,
-        non_performance: record.non_performance.saturating_sub(decayed),
-        last_update_ticks: now_ticks,
+        non_performance,
+        // With nothing left to decay there is no remainder worth carrying, and holding a stale stamp
+        // would hand the NEXT penalty a partial period it never served. A cleared record therefore
+        // starts its next penalty from `now_ticks`.
+        last_update_ticks: if non_performance == 0 {
+            now_ticks
+        } else {
+            record
+                .last_update_ticks
+                .saturating_add(periods.saturating_mul(NON_PERFORMANCE_DECAY_TICKS))
+        },
     }
 }
 
@@ -192,23 +216,84 @@ mod tests {
         assert_eq!(stalled.non_performance, NON_PERFORMANCE_PENALTY);
     }
 
-    /// SPEC §8.2A.1: a distressed peer recovers without intervening. The fixture drives the peer to
-    /// the WORST reachable state and then only advances time — no honest answer, no proof, nothing
-    /// the peer had to do — and the share must return to full.
-    #[test]
-    fn a_distressed_peer_recovers_on_time_alone() {
+    /// Drive a record to the ceiling, the worst state manufactured distress can reach.
+    fn saturated() -> ConductRecord {
         let mut record = ConductRecord::neutral();
         for _ in 0..NON_PERFORMANCE_CEILING * 2 {
             record = observe(record, ConductEvidence::NonPerformance, 0);
         }
         assert_eq!(record.non_performance, NON_PERFORMANCE_CEILING);
+        record
+    }
 
-        let recovered = decay(
-            record,
-            NON_PERFORMANCE_DECAY_TICKS * u64::from(NON_PERFORMANCE_CEILING),
+    /// A span long enough to clear a saturated record with a whole period to spare, taken FROM the
+    /// constants rather than picked, so the fixture keeps its meaning if they are retuned.
+    const RECOVERY_SPAN: u64 = NON_PERFORMANCE_DECAY_TICKS * (NON_PERFORMANCE_CEILING as u64 + 1);
+
+    /// SPEC §8.2A.1: **recovery depends on elapsed time and on nothing else.**
+    ///
+    /// The property, not the outcome. Asserting only "the share returns to full after a long time"
+    /// is satisfied by an implementation that snaps `last_update_ticks` to `now_ticks` and discards
+    /// the sub-period remainder, because a single large jump is the one shape where truncation costs
+    /// nothing — and that implementation never decays a peer this node keeps talking to.
+    ///
+    /// So the fixture varies exactly ONE thing — how often the peer is observed — and keeps an
+    /// untouched control on the identical span. The observations are `HonestAnswer`, which earns no
+    /// penalty, at an interval deliberately SHORTER than a decay period: under truncation every one
+    /// of them resets the clock, so `elapsed` is never a whole period and the penalty is permanent.
+    #[test]
+    fn a_distressed_peer_recovers_on_time_alone() {
+        let interval = NON_PERFORMANCE_DECAY_TICKS / 6;
+        assert!(
+            interval > 0 && interval < NON_PERFORMANCE_DECAY_TICKS,
+            "the observation interval must be sub-period or the fixture cannot see truncation"
         );
-        assert_eq!(recovered.non_performance, 0);
-        assert_eq!(dial_share(recovered), 1.0);
+
+        let mut chatty = saturated();
+        let mut now = 0;
+        while now < RECOVERY_SPAN {
+            now += interval;
+            chatty = observe(chatty, ConductEvidence::HonestAnswer, now);
+        }
+
+        // The control: the same peer, the same span, observed only once at the end.
+        let quiet = decay(saturated(), now);
+
+        assert_eq!(
+            chatty.non_performance, 0,
+            "a peer that kept answering has not shed its penalty after {now} ticks — recovery is              being gated on how often this node observed it, not on elapsed time (SPEC §8.2A.1)"
+        );
+        assert_eq!(
+            chatty.non_performance, quiet.non_performance,
+            "being talked to changed the penalty; it must be a function of elapsed ticks alone"
+        );
+        assert_eq!(dial_share(chatty), 1.0);
+        assert_eq!(dial_share(chatty), dial_share(quiet));
+    }
+
+    /// The remainder is CARRIED, not discarded — the half of the fix the recovery test cannot see,
+    /// because it only observes the fully-recovered end state.
+    ///
+    /// Two sub-period steps that together exceed one period MUST spend one unit; under truncation
+    /// they spend none. The control in the same test pins the other side of the bound: a step that
+    /// stays strictly under one period MUST spend nothing, so this cannot pass by decaying eagerly.
+    #[test]
+    fn sub_period_observations_accumulate_toward_the_next_decay() {
+        let start = saturated();
+        let just_under = NON_PERFORMANCE_DECAY_TICKS - 1;
+
+        let stepped = observe(start, ConductEvidence::HonestAnswer, just_under);
+        assert_eq!(
+            stepped.non_performance, NON_PERFORMANCE_CEILING,
+            "less than one whole period elapsed; nothing may decay yet"
+        );
+
+        let stepped = observe(stepped, ConductEvidence::HonestAnswer, just_under + 2);
+        assert_eq!(
+            stepped.non_performance,
+            NON_PERFORMANCE_CEILING - 1,
+            "the two steps together exceed one decay period, so one unit must have been spent"
+        );
     }
 
     /// SPEC §8.2A.2 — the load-bearing bound. The fixture saturates the penalty far beyond its
