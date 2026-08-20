@@ -209,7 +209,7 @@ of §2A.3 arriving through the front door.
 
 ### 2A.5 The ledger is an INPUT to the decision core
 
-§1.2 requires the decision core to be pure. The ledger is I/O, so **the core MUST NOT read or write it
+§1.3 requires the decision core to be pure. The ledger is I/O, so **the core MUST NOT read or write it
 directly**: claimed-reward figures enter the core as caller-supplied inputs, exactly as tick counters and
 the tie-break seed do (§4.4).
 
