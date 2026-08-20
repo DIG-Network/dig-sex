@@ -67,7 +67,37 @@ It MUST NOT become a transport, a discovery mechanism, a fetcher, or a verifier:
 **The dividing line is mechanism versus policy.** *"Stage to a temp file, fsync, rename"* is mechanism.
 *"Which store, from whom, and what do I drop to make room"* is policy.
 
-### 1.2 Purity
+### 1.2 Dependencies
+
+`dig-sex` sits at **40-application**, so it may depend on any lower level and MUST NOT be depended upon by
+one. Every crate below is an existing ecosystem crate; **this crate MUST use them rather than
+re-implement their behaviour** (§11.1). Versions are the levels present at the time of writing and MUST
+be resolved to a single set across the graph (§11.3).
+
+| crate | level | version | why |
+|---|---|---|---|
+| `dig-constants` | 00 | 0.9.0 | shared constants; MUST NOT hardcode a value that lives here |
+| `dig-pex` | 00 | 0.1.1 | peer records and the first-hand/second-hand provenance distinction |
+| `dig-peer-protocol` | 00 | 0.6.0 | the peer opcode surface the recursive ask rides (§6.1) |
+| `dig-chainsource-interface` | 00 | 0.2.0 | chain reads for reconciling the reward ledger (§2A.2) |
+| `dig-nat` | 10 | 0.19.0 | peer identity and transport types crossing composed APIs (§11.3) |
+| `dig-capsule` | 10 | 0.5.0 | the capsule identity acquired whole on a read-triggered fetch (§5.1) |
+| `dig-dht` | 20 | 0.12.0 | provider discovery, announce and **retract** (§7.1) |
+| `dig-evidence` | 20 | 0.2.0 | on-chain evidence and proof TYPES; the canonical home, never a second copy |
+| `dig-peer` | 20 | 0.10.0 | the peer abstraction the exchange dials |
+| `dig-download` | 30 | 0.15.0 | byte movement, ranges, resume |
+| `dig-peer-selector` | 30 | 0.9.0 | peer selection — **compose it, do not replace it** |
+| `dig-store-cache` | 30 | 0.1.1 | on-disk admission/eviction mechanics, and the eviction-policy seam this crate implements (§11.1) |
+
+**Deferred, pending the payment specification:** `dig-mirror-coin` (10, 0.3.0) locks $DIG as collateral to
+advertise a mirror, and is the expected source of **stake evidence** for §2.4's paid-retention input. It
+MUST NOT be wired until that specification exists, and stake MUST arrive as an input (§2.4.2), never be
+asserted by this crate.
+
+**Not a dependency of this crate:** `dig-logging` is required of DIG service **binaries**, not libraries.
+This crate MUST NOT install a subscriber or a sink; it emits through the host's.
+
+### 1.3 Purity
 
 The decision core MUST be **pure and deterministic**: no clock, no network, no filesystem, no ambient
 randomness. Time enters only as caller-supplied monotonic tick counters; randomness only as a
@@ -259,7 +289,7 @@ only mechanism here producing even coverage without coordination.
 Two constraints, both required:
 
 - **The seed MUST be an INPUT**, drawn from node-local state, never ambiently inside the scorer. The same
-  inputs including the seed MUST reproduce the same selection, preserving §1.2.
+  inputs including the seed MUST reproduce the same selection, preserving §1.3.
 - **The seed MUST NOT be peer-derivable.** An attacker who can predict or influence it can bias which
   ties this node resolves in their favour, turning decorrelation into targeting. Node identity or local
   entropy is sound; content ids, provider counts, or anything a peer supplies is not.
@@ -422,7 +452,7 @@ the attacker does not control.**
 Consequently:
 
 1. **Non-performance penalties MUST decay with time**, on the same monotonic tick basis as everything else
-   (§1.2), so a distressed peer recovers **without intervention and without needing to prove anything**.
+   (§1.3), so a distressed peer recovers **without intervention and without needing to prove anything**.
 2. **A non-performance penalty MUST NOT reduce a peer's dial share to zero.** A peer that can never be
    retried can never demonstrate recovery, which converts a transient penalty into the permanent exclusion
    this section exists to prevent.
@@ -469,6 +499,37 @@ Any store, cache, or ban list keyed by peer-supplied values MUST be bounded, and
 stated. Refusal at a limit MUST be weighed against truncation: **refusing at a limit can be a cheaper
 denial than the one the limit prevents.**
 
+### 8.5 Load, exhaustion, and denial of service
+
+This crate sits on inbound peer traffic, so **every path a stranger can trigger is an attack surface** and
+MUST be bounded before the work is done, not after.
+
+1. **Admit before you work.** Rate limiting, budget checks and concurrency permits MUST be taken **before**
+   a peer is selected, a dial is opened, or a lookup is walked. A limiter consulted after the expensive
+   step bounds nothing.
+2. **Meter by AUTHENTICATED identity.** The key MUST be the identity the transport verified, never one the
+   caller supplies. A path that falls back to a placeholder identity collapses every requestor into **one
+   shared bucket**, which is a worse denial surface than no limiter at all — one abusive caller then
+   exhausts the allowance of everyone.
+3. **Relayed work draws on a separate budget** from this node's own (§6.1.8), or a hop spends a victim's
+   allowance across every peer it holds.
+4. **No unbounded queue, map, or retry.** Everything keyed by peer-supplied values is bounded with a
+   stated eviction policy (§8.4). Retries MUST be finite and MUST back off.
+5. **Shed load; do not degrade silently.** Under pressure an implementation MUST refuse work and say so
+   rather than accepting it and becoming slow. A silent slowdown is indistinguishable from an outage and
+   cannot be diagnosed by the operator (§10).
+6. **A single peer MUST NOT be able to consume the whole dial budget**, nor to fill the cache, nor to
+   occupy every concurrency slot. Per-peer shares MUST exist for each.
+7. **Bound the cost of a request before granting it.** A request whose work is proportional to an
+   attacker-chosen number MUST have that number clamped at the boundary.
+
+**Cache thrashing is a denial vector, not only an inefficiency.** A peer that can drive admission and
+eviction in a loop spends this node's disk bandwidth indefinitely while producing no net change in what is
+held. The displacement margin (§3.2) is the primary defence and MUST NOT be configurable to zero.
+
+**The reputation system is itself an attack surface** (§8.2A): if degrading a competitor costs an attacker
+less than serving content, it has become the cheapest available attack rather than a defence.
+
 ---
 
 ## 9. Configuration
@@ -495,7 +556,7 @@ An implementation MUST expose, readable by an operator without a debugger:
 1. current holdings and the retraction set of the last admission (§7.4);
 2. per-tier occupancy against per-tier bound (§4.2);
 3. whether recursive discovery is enabled, and its disclosure radius (§6.2);
-4. the reason an eviction chose its victims, sufficient to replay it offline (§1.2).
+4. the reason an eviction chose its victims, sufficient to replay it offline (§1.3).
 
 **A log line proving code ran is not an effect.** Where a decision is already made identically one layer
 down, that MUST be stated rather than presented as a behaviour change.
@@ -562,8 +623,12 @@ An implementation conforms when:
      assertion (§8.2A);
 18. no durable exclusion rests on a signal that cannot distinguish a lie from a transport failure (§8.3);
 19. all state keyed by untrusted input is bounded (§8.4);
+19a. every peer-triggered path is admitted before the work is done, metered by AUTHENTICATED identity
+     rather than a caller-supplied or placeholder one, and no single peer can consume the whole dial
+     budget, cache, or concurrency (§8.5);
+19b. the displacement margin cannot be configured to zero (§8.5);
 20. every configuration switch has a stated default and fails to the safe setting (§9);
 21. the four observability surfaces of §10 exist;
 22. no behaviour owned by a composed crate is re-implemented, and identifier types resolve to one version
     (§11);
-23. the decision core is pure and every decision is replayable offline from recorded inputs (§1.2).
+23. the decision core is pure and every decision is replayable offline from recorded inputs (§1.3).
