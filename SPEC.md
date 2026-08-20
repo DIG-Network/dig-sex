@@ -83,7 +83,6 @@ be resolved to a single set across the graph (§11.3).
 | `dig-nat` | 10 | 0.19.0 | peer identity and transport types crossing composed APIs (§11.3) |
 | `dig-capsule` | 10 | 0.5.0 | the capsule identity acquired whole on a read-triggered fetch (§5.1) |
 | `dig-dht` | 20 | 0.12.0 | provider discovery, announce and **retract** (§7.1) |
-| `dig-evidence` | 20 | 0.2.0 | on-chain evidence and proof TYPES; the canonical home, never a second copy |
 | `dig-peer` | 20 | 0.10.0 | the peer abstraction the exchange dials |
 | `dig-download` | 30 | 0.15.0 | byte movement, ranges, resume |
 | `dig-peer-selector` | 30 | 0.9.0 | peer selection — **compose it, do not replace it** |
@@ -96,6 +95,12 @@ asserted by this crate.
 
 **Not a dependency of this crate:** `dig-logging` is required of DIG service **binaries**, not libraries.
 This crate MUST NOT install a subscriber or a sink; it emits through the host's.
+
+**`dig-evidence` MUST NOT be used.** It is an **L2 crate**, and this crate is not an L2 consumer. The
+similarity of name is a trap: the **evidence** this specification refers to — §2.4's demotion channel and
+§8.2A's peer-conduct classes — is **this crate's own local, peer-scoped type**, describing what a peer did
+to this node. It is not on-chain L2 evidence and MUST NOT be conflated with it, nor reuse its types to
+borrow their authority.
 
 ### 1.3 Purity
 
