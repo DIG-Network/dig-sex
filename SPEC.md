@@ -1,260 +1,497 @@
 # dig-sex — normative specification
 
-**Status: MODEL + CONSTRAINTS.** This describes the store-exchange model as it exists in the ecosystem
-today and is being folded into this crate. Behavioural clauses land with the implementation; the model
-and the constraints below are normative now.
+The authoritative contract for the DIG store-exchange layer. An independent implementation built against
+this document alone must interoperate with, and be substitutable for, the reference one.
+
+Requirement levels are RFC 2119. Where a clause records a defect this ecosystem has already measured, the
+reason is stated with it — those reasons are normative context, not commentary, because each is a rule
+someone previously violated by accident.
+
+---
 
 ## 0. The objective function
 
 **Optimise for PROFIT first. Subject to that, MAXIMISE THE NUMBER OF MIRRORS within the disk allocation.**
 
-The two are **lexicographic, not weighted**: no quantity of additional mirrors justifies sacrificing paid
-retention. There is no exchange rate between them, and an implementation MUST NOT introduce one.
+The two are **lexicographic, not weighted**. No quantity of additional mirrors justifies sacrificing paid
+retention, there is no exchange rate between them, and an implementation MUST NOT introduce one.
 
-Everything below is machinery for this. The tier ladder (§2) implements the primary objective —
-`Tier2Bribed` is sacrificed last because it is the paid tier. The relevance score (§3) and the selection
-in §3.1 implement the secondary objective within whatever capacity the primary leaves.
+Everything in this document is machinery for that sentence. The tier ladder (§2) implements the primary
+objective; the score (§3) and the selection (§4) implement the secondary objective within whatever
+capacity the primary leaves.
 
-### 0.1 The secondary objective is a COUNT, and that makes size first-class
+### 0.1 The secondary objective is a COUNT, so size is first-class
 
-*Maximise mirrors* means maximise the **number of stores mirrored**, not the number of bytes held nor the
-aggregate relevance retained. **All else equal, many small stores beat one large store**, because each
-mirror is a unit of network usefulness regardless of its size.
+*Maximise mirrors* means maximise the **number of stores mirrored** — not bytes held, not aggregate
+relevance retained. **All else equal, many small stores beat one large store**, because each mirror is a
+unit of network usefulness regardless of its size.
 
-This is why size MUST NOT enter the relevance score: score is **value**, size is **weight**, and mixing
-them destroys the ability to select against a capacity bound. The existing model already records this
-decision — `size_bytes` is carried *"for downstream knapsack selection (later children); it does not enter
-the relevance score itself."* **This crate is that later child.**
+Therefore **size MUST NOT enter the relevance score**. Score is **value**, size is **weight**, and mixing
+them destroys the ability to select against a capacity bound.
 
-### 0.2 Two questions this specification does NOT yet answer
+### 0.2 Deliberately unspecified
 
-Both are deferred deliberately, and an implementation MUST NOT settle either by accident:
+An implementation MUST NOT settle either of these by accident:
 
-1. **Is profit honoured, or sought?** Retaining what has been paid for is unambiguous. Whether a node
-   should *acquire* content because it expects payment is a different behaviour with different failure
-   modes, and it is not specified here.
+1. **Whether profit is merely honoured or actively sought.** Retaining what has been paid for is
+   unambiguous. Acquiring content because payment is *expected* is a different behaviour with different
+   failure modes, and is not specified here.
 2. **What counts as profit** — the accounting unit, its proof, and what makes it non-repudiable — belongs
-   with the paid-retention algorithm (§2.3) and is deferred with it.
+   with the paid-retention algorithm (§2.4).
 
-Until both are settled, an implementation MUST treat the primary objective as **"never sacrifice paid
-content to hold unpaid content"** and no more than that.
+Until both are answered, the primary objective means exactly **"never sacrifice paid content to hold
+unpaid content"** and no more.
+
+---
 
 ## 1. Scope
 
-`dig-sex` (Store EXchange) is the **policy layer** for exchanging DIG stores between peers, and the home
-of the **cache/relevance/tier system** that decides what a node holds.
+`dig-sex` owns the **policy** of the full store-exchange lifecycle: **requesting**, **delivering**, the
+**recursive discovery** between them, and the **cache/tier/relevance system** deciding what a node holds.
 
-It answers: *which* store to acquire, *with whom* to exchange, *what to keep*, *what to sacrifice first*,
-and *when a fresh candidate is worth displacing an incumbent*.
+It answers: which store to acquire, from whom, what to keep, what to sacrifice first, when a candidate is
+worth displacing an incumbent, and what to do when a peer asks for something this node does not hold.
 
-It is **not** a transport, a discovery mechanism, or a fetcher, and MUST NOT become one. `dig-dht` finds
-providers, `dig-pex` exchanges peer records, `dig-download` moves bytes, `dig-store-cache` performs the
-on-disk admission and eviction **mechanics**. This crate owns the **decisions** those mechanisms carry
-out.
+### 1.1 What this crate is NOT
+
+It MUST NOT become a transport, a discovery mechanism, a fetcher, or a verifier:
+
+| concern | owner | this crate's part |
+|---|---|---|
+| provider discovery, announce/retract | `dig-dht` | decides *when* to announce and retract |
+| peer records, gossip | `dig-pex` | decides *which* peers to prefer |
+| byte movement, ranges, resume | `dig-download` | decides *what* to fetch and *from whom* |
+| on-disk staging, fsync, rename, rebuild | `dig-store-cache` | decides *what to admit and evict* |
+| merkle / chain-anchor verification | the caller | MUST NOT re-implement |
 
 **The dividing line is mechanism versus policy.** *"Stage to a temp file, fsync, rename"* is mechanism.
 *"Which store, from whom, and what do I drop to make room"* is policy.
 
+### 1.2 Purity
+
+The decision core MUST be **pure and deterministic**: no clock, no network, no filesystem, no ambient
+randomness. Time enters only as caller-supplied monotonic tick counters; randomness only as a
+caller-supplied seed (§4.4).
+
+**This is load-bearing, not stylistic.** An exchange-policy regression is otherwise invisible — content
+still arrives, just slower and from worse peers — so every decision MUST be replayable and auditable
+offline from its recorded inputs.
+
+---
+
 ## 2. The tier model
 
-Every cacheable store holds a **tier**. Three exist:
+Every cacheable store holds exactly one **effective tier**.
 
-| tier | earned by | eviction precedence |
-|---|---|---|
-| **`Tier0Precache`** | speculative acquisition (DHT-neighbourhood precache) | sacrificed **FIRST** |
-| **`Tier1Demand`** | a real read — local, or an inbound peer request | sacrificed only after all `Tier0` |
-| **`Tier2Bribed`** | a backer paid to keep it resident | sacrificed **LAST** |
+| tier | rank | earned by | eviction precedence |
+|---|---|---|---|
+| `Tier0Precache` | 0 | speculative acquisition (neighbourhood precache) | sacrificed **FIRST** |
+| `Tier1Demand` | 1 | a real read — local, or an inbound peer request | sacrificed after all `Tier0` |
+| `Tier2Bribed` | 2 | a backer paid to keep it resident | sacrificed **LAST** |
 
-### 2.1 Cross-tier precedence is absolute; score orders only within a tier
+### 2.1 Cross-tier precedence is absolute
 
 **A relevance score MUST NOT move a store across tiers.** Across tiers, eviction precedence is fixed by
-the tier alone. Within a tier, the score orders candidates.
+the tier alone. Within a tier, score and selection order candidates.
 
-This is what makes the system a **capacity ladder**: higher tiers claim disk first, and **lower tiers
-occupy only the space higher tiers did not**. A `Tier0` entry is not "less relevant" than a `Tier1`
-entry — it is *sacrificeable first regardless of relevance*, and that is deliberate.
+This makes the system a **capacity ladder**: higher tiers claim disk first, and **lower tiers occupy only
+what higher tiers did not**. A `Tier0` entry is not *less relevant* than a `Tier1` entry — it is
+**sacrificeable first regardless of relevance**, and that is deliberate.
 
-### 2.2 A store's tier is the MAXIMUM across its sources
+### 2.2 Effective tier is the MAXIMUM across sources
 
-A store may earn a tier by more than one route simultaneously. **Its effective tier is the maximum**, so
-acquiring a store speculatively and then reading it promotes it; the promotion MUST NOT be lost when the
-speculative reason lapses.
+A store MAY earn a tier by several routes at once; its effective tier is the **maximum**.
 
-### 2.3 `Tier2Bribed` exists; its algorithm does not yet
+A promotion MUST survive the lapse of a lower reason: a store acquired speculatively and then read is
+`Tier1Demand`, and MUST NOT fall back when the speculative reason expires while the read remains the more
+recent fact.
 
-The paid tier is part of the model **now**. The algorithm that decides who pays, how much, and what
-proves it is **deferred** and MUST NOT be invented here.
+An implementation MUST enumerate its tier sources explicitly. A source not enumerated cannot contribute to
+the maximum, and silently omitting one demotes stores with no error.
 
-The seam MUST admit that algorithm later **without signature changes** — which means an implementation
-must be able to read what it needs (a price, a payer, a settlement outcome) and to demote a non-payer
-through the **same** evidence channel every other tier uses. An algorithm forced to keep non-payment in
-private state has been given an interface that does not fit it.
+### 2.3 Tier is persisted, and an unreadable tag fails SAFE
+
+A store's tier MUST survive restart. A tag missing, truncated, or unrecognised MUST resolve to the
+**protected default**, never the sacrificeable one — an unreadable tag MUST NOT cause eviction.
+
+The persisted form SHOULD be a stable human-legible token rather than a numeric rank, so a future
+renumbering cannot silently repoint existing tags.
+
+### 2.4 `Tier2Bribed` exists; its algorithm is deferred
+
+The paid tier is part of the model **now**. The algorithm deciding who pays, how much, and what proves it
+is **deferred** and MUST NOT be invented here.
+
+The seam MUST admit it later **without signature changes**. A paid-retention implementation MUST be able
+to:
+
+1. **read a price** — a value it cannot read is one it cannot price against;
+2. **receive stake or payment evidence as an INPUT**, never assert it on the way out;
+3. **demote a non-payer through the same evidence channel every other tier uses** — an algorithm forced
+   to keep non-payment in private state has an interface that does not fit it;
+4. **meter a MONEY budget distinct from a byte budget.**
+
+A seam that cannot express all four does not conform, however well it expresses relevance.
+
+---
+
+## 2A. Reward accounting
+
+`Tier2Bribed` is earned by payment, so this crate MUST maintain a **persistent, per-store record of
+rewards claimed**. The node claims its rewards from an on-chain **reward distributor**; this crate tracks
+what was claimed, for which store, and how much.
+
+The claim MECHANISM — how a claim is constructed, submitted, and proven — is **deferred** and MUST NOT be
+invented here. This section specifies the ledger it will write to, so that the mechanism can be added
+without redesigning the store.
+
+### 2A.1 The ledger is persistent and on disk
+
+The record MUST survive process restart and MUST be durable against crash. A reward claimed and then lost
+is money the operator earned and cannot see; a ledger that only exists in memory turns every restart into
+an unnoticed loss.
+
+### 2A.2 The chain is authoritative; the ledger is a local view
+
+The ledger is a **cache of an on-chain fact**, never the fact itself. Where the two disagree, the chain
+wins and the ledger MUST be correctable from it.
+
+An implementation MUST be able to rebuild or reconcile the ledger from chain state. A local record that
+cannot be checked against its source is not an accounting record.
+
+### 2A.3 It MUST fail toward UNDER-counting
+
+The two error directions are not symmetric and MUST NOT be treated as such:
+
+- **Under-counting** — a claim made on chain but not recorded locally — costs the operator visibility of
+  income they already hold. Recoverable by reconciliation (§2A.2).
+- **Over-counting** — a claim recorded locally that did not occur, or was counted twice — makes this node
+  **hold unpaid content as though it were paid**, sacrificing genuinely paid content to do so. That is a
+  direct violation of §0's primary objective, and it is not self-correcting.
+
+Therefore, where an implementation must choose, it MUST fail toward under-counting.
+
+### 2A.4 Recording a claim MUST be idempotent
+
+A claim MUST be identified by something derived from the chain event itself, so that replaying, retrying,
+or re-observing it cannot double-count. A retry that inflates recorded profit is the over-counting failure
+of §2A.3 arriving through the front door.
+
+### 2A.5 The ledger is an INPUT to the decision core
+
+§1.2 requires the decision core to be pure. The ledger is I/O, so **the core MUST NOT read or write it
+directly**: claimed-reward figures enter the core as caller-supplied inputs, exactly as tick counters and
+the tie-break seed do (§4.4).
+
+This keeps every tier and eviction decision replayable offline from recorded inputs, and it keeps the
+accounting testable without a chain.
+
+### 2A.6 What this does NOT yet settle
+
+Recording *what was claimed* is not the same as deciding *what a store is worth keeping for*. §0.2's open
+question — whether profit is merely honoured or actively sought — is unaffected by this section, and the
+per-store figures MUST NOT be interpreted as a purchase price, a bid, or a promise of future payment
+without a specification saying so.
+
+---
 
 ## 3. Relevance scoring
 
-Within a tier, a store's desirability is a **score**, and the model is deliberately bounded:
+Within a tier, desirability is a bounded score.
 
 - **The primary signal is XOR distance** between the content id and this node's peer id. Content landing
-  near this node in the 256-bit keyspace is content the node is naturally responsible for.
+  near this node in the 256-bit keyspace is content this node is naturally responsible for.
 - Around it sit **bounded, weighted bonuses**: replication scarcity (keep what few others hold), local
   demand (keep what our own users read), pin adjacency, and a large **pinned** bonus.
+- Every bonus MUST be bounded. An unbounded term lets one input dominate, which is how a peer-supplied
+  signal becomes a control channel.
 
-**Scoring MUST remain pure and deterministic** — no clock, no network, no I/O. Time enters only as
-caller-supplied tick counters, so the same inputs always yield the same decision and any eviction can be
-**replayed and audited offline**. That property is load-bearing: an exchange-policy regression is
-otherwise invisible, because content still arrives, just slower and from worse peers.
+### 3.1 Untrusted inputs MUST be clamped
 
-### 3.1 Selection is a knapsack, per tier, over residual capacity
+Any input a peer can influence — a believed provider count above all — is **untrusted and potentially
+flooded**, and MUST be clamped before reaching the score (§8).
+
+### 3.2 Displacement requires a margin
+
+A fresh candidate MUST NOT displace an incumbent on a marginally higher score; it MUST exceed the
+incumbent by a configured **margin**. Without one, two near-equal stores evict each other repeatedly,
+spending bandwidth on churn that produces no net change in what is held.
+
+---
+
+## 4. Selection
+
+### 4.1 Selection is a per-tier knapsack over residual capacity
 
 Score alone does not decide what is held. **Within a tier, selection maximises the NUMBER of stores held
-against the capacity that tier is given** — score is the value, `size_bytes` is the weight, and the bound
-is whatever capacity higher tiers did not claim (§2.1).
+against the capacity that tier is given** — score is the value, size is the weight, and the bound is
+whatever higher tiers did not claim (§2.1).
 
-So a lower-scoring small store MAY be held over a higher-scoring large one **within the same tier**, and
-that is correct rather than a defect: it serves §0's secondary objective. It MUST NOT happen **across**
-tiers, where precedence is absolute.
+A lower-scoring small store MAY be held over a higher-scoring large one **within a tier**. That is
+correct, not a defect: it serves §0.1. It MUST NOT happen **across** tiers.
 
-An implementation MAY approximate the knapsack — an exact solution is not required — but it MUST NOT
-degenerate into "sort by score and fill", which ignores the count objective entirely and is the obvious
-wrong implementation.
+An implementation MAY approximate the knapsack. It MUST NOT degenerate into **sort-by-score-and-fill**,
+which ignores the count objective entirely and is the obvious wrong implementation.
 
-### 3.2 Ties are broken RANDOMLY, and the randomness is seeded
+### 4.2 Capacity
+
+The node has a configured total allocation. Tiers claim it in descending rank order; each tier's bound is
+the allocation minus what higher tiers claimed.
+
+**Pins are an operator override**: a pinned entry MUST NOT be evicted and MAY push the node over its
+allocation. An implementation MUST NOT silently re-evict to compensate.
+
+### 4.3 Admission may exceed, or refuse
+
+An implementation MAY admit over capacity when a policy returns too few victims; that is the caller's
+explicit choice and MUST be reported, never silently corrected. An item larger than the whole allocation
+MUST be refused rather than triggering an unsatisfiable eviction sweep.
+
+### 4.4 Ties are broken RANDOMLY, from a seeded source
 
 **Among candidates equal on profit and equal on size, selection MUST be random.**
 
 **This is a network property, not a fairness gesture.** A deterministic tiebreak makes every node with a
-similar view choose the *same* stores — so a few stores are mirrored by everyone and others by nobody,
-and the network's aggregate coverage is far worse than the same disk spent randomly. Randomising
-decorrelates independent nodes, which is the only mechanism here that produces even coverage without any
-node coordinating with another.
+similar view choose the *same* stores — a few mirrored by everyone, the rest by nobody — and aggregate
+coverage is far worse than the same disk spent randomly. Randomising decorrelates independent nodes, the
+only mechanism here producing even coverage without coordination.
 
-Two constraints make this compatible with §3's replayability, and both are required:
+Two constraints, both required:
 
-- **The randomness MUST be seeded from node-local state, and the seed MUST be an input** — like the tick
-  counters, never drawn ambiently inside the scorer. The same inputs including the seed MUST reproduce
-  the same selection, so an eviction remains replayable and auditable offline. A decision that cannot be
-  reproduced cannot be audited, and an exchange-policy regression is invisible without that.
-- **The seed MUST NOT be derivable from peer-supplied input.** If an attacker can predict or influence
-  it, they can bias which ties this node resolves in their favour — turning a decorrelation mechanism
-  into a targeting one. Seeding from the node's own identity or local entropy is sound; seeding from
-  content ids, provider counts, or anything a peer supplies is not.
+- **The seed MUST be an INPUT**, drawn from node-local state, never ambiently inside the scorer. The same
+  inputs including the seed MUST reproduce the same selection, preserving §1.2.
+- **The seed MUST NOT be peer-derivable.** An attacker who can predict or influence it can bias which
+  ties this node resolves in their favour, turning decorrelation into targeting. Node identity or local
+  entropy is sound; content ids, provider counts, or anything a peer supplies is not.
 
-**Randomise only among genuine ties.** Randomness MUST NOT reach across a profit difference or a size
-difference — it is the last step of selection, after §0's objectives have ordered everything they can.
+**Randomise only among genuine ties.** Randomness MUST NOT reach across a profit or size difference — it
+is the last step, after §0's objectives have ordered everything they can.
 
-**A pinned entry MUST NOT be evicted**, and a pin MAY push a node over its configured capacity. That is
-the operator's explicit override.
+---
 
-## 4. Acquisition
+## 5. Acquisition
 
-### 4.1 A read creates relevance
+### 5.1 A read creates relevance
 
 When a read for a `(store_id, root)` is satisfied **from another node**, the node SHOULD acquire the
-**whole** `.dig` capsule for that generation in the background, so the next read is served locally. A
-one-off remote read becomes a durable local copy **without** the store being subscribed.
+**whole** capsule for that generation in the background, so the next read is served locally. A one-off
+remote read becomes a durable local copy **without** the store being subscribed.
 
-This is `Tier1Demand`: the request itself is the evidence of relevance. It MUST be non-blocking, MUST NOT
-delay the read that triggered it, and MUST deduplicate concurrent triggers for the same `store:root` into
-one acquisition.
+This is `Tier1Demand` — the request itself is the evidence. It MUST be non-blocking, MUST NOT delay the
+triggering read, and MUST deduplicate concurrent triggers for the same `store:root` into **one**
+acquisition. It MUST be configurable, SHOULD default ON, and MUST be a no-op when the capsule is held.
 
-### 4.2 Acquisition is not admission
+### 5.2 Acquisition is not admission
 
-Verification is **not** this crate's job and MUST NOT be re-implemented here: content is accepted because
-it verifies against its chain-anchored root, and the cache is caller-verifies by contract. A tier decision
-MUST NOT be read as a statement that content is valid.
+Verification is not this crate's job (§1.1). Content is admitted because it verified against its
+chain-anchored root; a tier decision MUST NOT be read as a statement that content is valid.
 
-## 5. Eviction is a retract
+---
 
-**Every eviction is also an advertising retraction.** A store dropped from the cache is one the node MUST
-stop advertising as a holding — the provider record and the holdings announcement follow the cache, not
-the other way round.
+## 6. Delivery
 
-A node that evicts without retracting advertises content it cannot serve, which spends other nodes' dial
+### 6.1 Recursive discovery on an inbound miss
+
+**A node receiving a request for a store it does not hold MUST be able to ask its own peers** rather than
+answering a bare absence.
+
+Recursion is what makes a partial peer set usable: a node's held peers are a narrow, arbitrary slice of
+the network, every peer's slice differs, and an answer this node cannot give may be one hop away. A global
+provider index cannot substitute — it cannot reach a holder it has never heard of, nor one reachable only
+through a peer's peer. The two are **complementary**.
+
+Requirements, each earned by a shipped implementation:
+
+1. **Bounded by a hop budget carried in the request**, honoured on receipt as well as on send. **A hop
+   that cannot read the budget MUST NOT forward** — refuse, never forward optimistically.
+2. **The fan-out is an exponent, not a knob.** Reach is `fan_out ^ hop_cap`; one admitted request can
+   recruit hundreds of nodes. The real per-request cost MUST be documented, and a **concurrency ceiling
+   MUST NOT be described as bounding the aggregate** — it bounds how many happen at once, not how many
+   happen.
+3. **OFF by default.** A path spending *other* nodes' bandwidth MUST NOT be gated more loosely than one
+   spending only this node's. An unrecognised configuration value MUST **fail closed**, so a typo cannot
+   enable a network-wide amplifier.
+4. **A disabled node MUST forward nothing**, including relaying for others — the switch cuts the chain at
+   every disabled node, not only at originators.
+5. **Answers from a hop are HEARSAY.** They are candidates for the **fetch** path, where verification
+   makes a wrong candidate merely wasted. They MUST NOT enter an answer this node asserts to a third
+   party as its own.
+6. **A forwarded answer MUST NOT displace a locally-known one.** Where an answer set is capped, the cap
+   MUST fall on the **forwarded** portion — otherwise one peer returning a full slate of fabricated
+   holders evicts every genuine holder from the answer, for free.
+7. **The requestor and this node MUST be excluded from the fan-out**, and a hop MUST NOT be asked its own
+   question back.
+8. **Relaying MUST draw on a budget separate from this node's own requests.** Otherwise a hop's fan-out
+   is billed to the hop's allowance at its peers, and one admitted request spends a victim's budget
+   across every peer it holds.
+
+### 6.2 What recursion discloses
+
+An implementation MUST state its **disclosure radius** — how many nodes learn of a request, none of them
+chosen or enumerable by the requestor.
+
+The absence of a requestor identity MUST NOT be described as **anonymity**: a peer is free to log what it
+was asked. The disclosure happens on a **miss**, precisely when the requestor has not yet decided to
+contact any holder, so it is not a disclosure a completed direct read would have made anyway.
+
+### 6.3 Serving
+
+A node MUST serve what it holds and advertises, and MUST NOT advertise what it cannot serve (§7.4).
+
+---
+
+## 7. Eviction and advertisement
+
+### 7.1 Eviction is a retraction
+
+**Every eviction is also an advertising retraction.** A store dropped from the cache MUST stop being
+advertised as a holding; the provider record and the holdings announcement follow the cache.
+
+A node that evicts without retracting advertises content it cannot serve, spending other nodes' dial
 budget on a guaranteed miss.
 
-## 6. Pluggability
+### 7.2 Eviction order
 
-What plugs in is **how a candidate earns a tier** and **how it scores within one**. The tier ladder and
-its precedence are the fixed frame.
+Victims are chosen by `(tier rank ascending, then within-tier selection)`. A policy MUST NOT select a
+pinned entry (§4.2). Returning too few victims is permitted (§4.3).
 
-Several relevance strategies are valid simultaneously and the architecture MUST support that — this is a
-set of tiered acquisition sources competing for one capacity budget, not a single algorithm with a single
-policy.
+### 7.3 A recency signal driven by inbound requests is attacker-chosen
 
-**Where a composed crate already exposes a decision seam, this crate MUST implement it rather than build a
-rival.** `dig-store-cache`'s eviction-policy trait is such a seam, and its own documentation describes the
-relevance model as the brain it *"will later consult"* — the two were designed to meet.
+If "last access" is bumped by the same call that serves an **inbound peer request**, then on a serving
+node the eviction order becomes an attacker-chosen value — a peer keeps its own content resident and lets
+another's go cold.
 
-## 7. Trust
+Any recency input MUST distinguish a **local** read from an **inbound serve**, or MUST NOT be used to
+order eviction.
 
-Every peer is untrusted (NC-12). An exchange decision reads peer-supplied claims — what a peer says it
-holds, wants, or will pay. **A claim is not evidence.**
+### 7.4 Advertisement follows holdings
 
-### 7.1 Ranking
+The advertised set MUST be derivable from what is held. An implementation MUST expose the current
+holdings and the retraction set produced by each admission.
+
+---
+
+## 8. Trust
+
+Every peer is untrusted. An exchange decision reads peer-supplied claims — what a peer says it holds,
+wants, or will pay. **A claim is not evidence.**
+
+### 8.1 Ranking
 
 **An algorithm MUST NOT promote a candidate on the strength of a declaration.** It MAY demote on
-evidence. For every ordering input the question is *"can this move a candidate UP?"* — and if a peer
-supplies it, the answer must be no.
+evidence. For every ordering input: *can this move a candidate UP?* If a peer supplies it, the answer MUST
+be no.
+
+### 8.2 Silence
 
 **Silence is the cheapest adversarial claim.** For every ranking input the specification MUST state what
 an **absent** value does, and **an absent value MUST NOT outrank a present one**. A guard whose rationale
-names a behaviour is walked past by a peer that declines to exhibit it.
+names a *behaviour* is walked past by a peer that declines to exhibit it.
 
-### 7.2 A recency signal driven by inbound requests is attacker-chosen
-
-If "last access" is bumped by the same call that serves an inbound peer request, then on a serving node
-**the eviction order is an attacker-chosen value** — a peer can keep its own content resident and let
-another's go cold. Any recency input MUST distinguish a local read from an inbound serve, or MUST NOT be
-used to order eviction.
-
-### 7.3 Exclusion
+### 8.3 Exclusion
 
 **A durable, cross-transfer exclusion MUST NOT rest on a signal that cannot distinguish a lie from a
-transport failure.** Persisting one lets peers that withhold their assigned chunks brand an honest holder
-until only attacker-supplied candidates are ever asked for. An exclusion earned by a **proven** lie — a
-whole-blob hash mismatch against a chain anchor — is a different fact and MAY persist.
+transport failure.** Persisting one lets peers that withhold assigned chunks brand an honest holder until
+only attacker-supplied candidates are ever asked for.
 
-## 8. Composition
+An exclusion earned by a **proven** lie — a whole-blob hash mismatch against a chain anchor — is a
+different fact and MAY persist.
+
+### 8.4 Unbounded state keyed by untrusted input
+
+Any store, cache, or ban list keyed by peer-supplied values MUST be bounded, and its eviction policy
+stated. Refusal at a limit MUST be weighed against truncation: **refusing at a limit can be a cheaper
+denial than the one the limit prevents.**
+
+---
+
+## 9. Configuration
+
+Every switch MUST have a stated default and a stated failure mode. An unrecognised value MUST resolve to
+the **safe** setting, never the permissive one.
+
+| setting | default | unrecognised value |
+|---|---|---|
+| total disk allocation | implementation-defined, documented | reject, do not guess |
+| read-triggered whole-capsule acquisition (§5.1) | **ON** | ON — it spends only this node's disk |
+| recursive discovery on inbound miss (§6.1) | **OFF** | **OFF** — it spends other nodes' bandwidth |
+| displacement margin (§3.2) | implementation-defined, documented | reject |
+
+The asymmetry between the two behavioural defaults is deliberate and MUST be preserved: one is local and
+bounded, the other recruits third parties.
+
+---
+
+## 10. Observability
+
+An implementation MUST expose, readable by an operator without a debugger:
+
+1. current holdings and the retraction set of the last admission (§7.4);
+2. per-tier occupancy against per-tier bound (§4.2);
+3. whether recursive discovery is enabled, and its disclosure radius (§6.2);
+4. the reason an eviction chose its victims, sufficient to replay it offline (§1.2).
+
+**A log line proving code ran is not an effect.** Where a decision is already made identically one layer
+down, that MUST be stated rather than presented as a behaviour change.
+
+---
+
+## 11. Composition and versioning
+
+### 11.1 No re-implementation
 
 **This crate MUST NOT re-implement behaviour owned by a crate it composes.** A second implementation of a
-shared behaviour is a future byte-drift bug.
+shared behaviour is a future byte-drift bug. Where a composed crate exposes a decision seam, this crate
+MUST implement it rather than build a rival.
 
-**A composed seam MUST be assumed lossy until read.** At least one boundary in this stack silently drops a
-field its producer set; composing on top of a seam without reading what survives it is building on an
-assumption.
+### 11.2 A composed seam MUST be assumed lossy until read
 
-## 9. Versioning
+At least one boundary in this stack silently drops a field its producer set. Composing on a seam without
+reading what survives it is building on an assumption.
 
-Identifier types crossing a composed crate's public API — content and peer identifiers in particular —
-MUST resolve to **one** version across the dependency graph. Two majors of the same type are distinct
-types.
+### 11.3 Single-version identifier types
 
-## 10. Honesty of effect
+Identifier types crossing a composed crate's public API — content and peer identifiers above all — MUST
+resolve to **one** version across the dependency graph. Two majors of one type are distinct types.
 
-A change here MUST have an effect an operator can observe, and this document MUST say what it is. **A log
-line proving the code ran is not an effect.** Where a decision is already made identically one layer down,
-that MUST be stated rather than presented as a behaviour change.
+---
 
-## 11. Conformance
+## 12. Conformance
 
 An implementation conforms when:
 
-1. paid retention is never sacrificed to hold unpaid content, and no exchange rate between the two
-   objectives exists (§0);
-2. within a tier, selection maximises the COUNT of stores held against residual capacity rather than
-   sorting by score and filling (§3.1);
-3. ties on profit and size are broken randomly, from a node-local seed that is an input and is not
-   peer-derivable (§3.2);
-4. cross-tier precedence is absolute and no score moves a store between tiers (§2.1);
-2. a store's effective tier is the maximum across its sources (§2.2);
-3. `Tier2Bribed` is expressible, and a paid-retention algorithm could be added without changing
-   signatures (§2.3);
-4. scoring is pure and any eviction is replayable offline (§3);
-5. a read satisfied remotely triggers a deduplicated, non-blocking whole-capsule acquisition (§4.1);
-6. every eviction retracts the corresponding advertisement (§5);
-7. no ordering input a peer supplies can promote a candidate, every absent value is specified, and no
-   recency signal is drivable by inbound requests (§7);
-8. no durable exclusion rests on a signal that cannot distinguish a lie from a transport failure (§7.3);
-9. no behaviour owned by a composed crate is re-implemented (§8);
-10. identifier types resolve to one version (§9);
-11. every claimed effect is observable and every non-effect disclosed (§10).
+1. paid retention is never sacrificed to hold unpaid content, and no exchange rate between the objectives
+   exists (§0);
+2. size does not enter the relevance score (§0.1);
+3. cross-tier precedence is absolute and no score moves a store between tiers (§2.1);
+4. effective tier is the maximum across enumerated sources, and a promotion survives a lower reason
+   lapsing (§2.2);
+5. an unreadable tier tag resolves to the protected default (§2.3);
+6. the seam admits a paid-retention algorithm meeting all four requirements of §2.4 without signature
+   changes;
+6a. rewards claimed are recorded per store, persistently and durably, reconcilable against chain state,
+    idempotent on replay, biased toward under-counting, and supplied to the decision core as an input
+    rather than read by it (§2A);
+7. every peer-influenced score input is bounded and clamped (§3.1);
+8. displacement requires a margin (§3.2);
+9. within-tier selection maximises the COUNT of stores against residual capacity and is not
+   sort-by-score-and-fill (§4.1);
+10. pinned entries are never evicted and may exceed the allocation (§4.2);
+11. ties on profit and size break randomly from a node-local, non-peer-derivable seed supplied as an input
+    (§4.4);
+12. a remotely-satisfied read triggers a deduplicated, non-blocking whole-capsule acquisition (§5.1);
+13. an inbound miss can recurse under a carried hop budget, defaults OFF, fails closed on an unrecognised
+    setting, forwards nothing when disabled, and never lets a forwarded answer displace a locally-known
+    one (§6.1);
+14. the disclosure radius is stated and never described as anonymity (§6.2);
+15. every eviction retracts the corresponding advertisement (§7.1);
+16. no recency signal used for eviction is drivable by inbound requests (§7.3);
+17. no ordering input a peer supplies can promote a candidate, and every absent value is specified
+    (§8.1, §8.2);
+18. no durable exclusion rests on a signal that cannot distinguish a lie from a transport failure (§8.3);
+19. all state keyed by untrusted input is bounded (§8.4);
+20. every configuration switch has a stated default and fails to the safe setting (§9);
+21. the four observability surfaces of §10 exist;
+22. no behaviour owned by a composed crate is re-implemented, and identifier types resolve to one version
+    (§11);
+23. the decision core is pure and every decision is replayable offline from recorded inputs (§1.2).
