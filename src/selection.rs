@@ -1,4 +1,4 @@
-//! Selection — the objective function made executable (SPEC §0, §3.1, §3.2).
+//! Selection — the objective function made executable (SPEC §0, §4.1, §4.4).
 //!
 //! # The objective, in the order it is applied
 //!
@@ -21,14 +21,14 @@
 //! then chooses among candidates the count objective cannot separate.
 //!
 //! The visible consequence is intended: **a lower-scoring small store may be held over a
-//! higher-scoring large one within a tier** (SPEC §3.1). It never happens across tiers.
+//! higher-scoring large one within a tier** (SPEC §4.1). It never happens across tiers.
 //!
 //! # Randomness is a network property, and it is seeded
 //!
 //! A deterministic final tiebreak makes every node with a similar view of the network choose the SAME
 //! stores, so a handful are mirrored by everyone and the rest by nobody. Randomising decorrelates
 //! independent nodes and is the only mechanism here that evens coverage without any node coordinating
-//! with another (SPEC §3.2).
+//! with another (SPEC §4.4).
 //!
 //! Two constraints keep that compatible with the replayability the whole model rests on, and both are
 //! enforced by the SIGNATURE rather than by convention:
@@ -43,7 +43,7 @@
 use crate::relevance::RelevanceValue;
 use crate::tier::CacheTier;
 
-/// A node-local selection seed (SPEC §3.2).
+/// A node-local selection seed (SPEC §4.4).
 ///
 /// Construct it from the node's own identity or local entropy. **Never** from a content id, a
 /// provider count, or anything else a peer supplies: a peer-derivable seed lets an attacker predict
@@ -79,7 +79,7 @@ impl SelectionSeed {
 ///
 /// Generic over the identifier so the same selection serves both an in-memory candidate set (keyed by
 /// content id) and the on-disk cache (keyed by `CapsuleIdentity`) without this crate re-declaring
-/// either identity type (SPEC §9 — identifier types resolve to one version because this crate defines
+/// either identity type (SPEC §11.3 — identifier types resolve to one version because this crate defines
 /// none of its own).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SelectionCandidate<Id> {
@@ -92,7 +92,7 @@ pub struct SelectionCandidate<Id> {
     /// Its relevance score WITHIN its tier. Never compared across tiers.
     pub score: RelevanceValue,
     /// An operator pin. A pinned candidate is always retained and MAY push the node over capacity —
-    /// the operator's explicit override (SPEC §3).
+    /// the operator's explicit override (SPEC §4.2).
     pub pinned: bool,
 }
 
@@ -114,7 +114,7 @@ pub struct Selection<Id> {
 /// Tiers are then offered the REMAINING capacity in descending rank, so a lower tier only ever sees
 /// what the tiers above it did not claim. Within a tier, candidates are ordered smallest-first (the
 /// count objective), then by score descending (the value the count objective cannot separate), then
-/// by a seeded shuffle (SPEC §3.2's last step, reached only when every objective has run out of
+/// by a seeded shuffle (SPEC §4.4's last step, reached only when every objective has run out of
 /// ordering power).
 ///
 /// Rejected candidates are returned in eviction order: the lowest tier's rejects first, and within a
@@ -179,7 +179,7 @@ pub fn select_within_capacity<Id: Copy>(
 
 /// The per-candidate shuffle value: the node-local seed mixed with the candidate's POSITION in the
 /// input. Deliberately not mixed with the candidate's id — an id is peer-influenced, and mixing it in
-/// would let a peer grind content that lands favourably in our tiebreaks (SPEC §3.2).
+/// would let a peer grind content that lands favourably in our tiebreaks (SPEC §4.4).
 fn tiebreak(seed: SelectionSeed, index: usize) -> u64 {
     mix64(seed.0 ^ mix64(index as u64))
 }
@@ -306,7 +306,7 @@ mod tests {
         assert_eq!(selection.rejected.len(), 50);
     }
 
-    /// SPEC §3.1: within a tier, a lower-scoring SMALL store may be held over a higher-scoring large
+    /// SPEC §4.1: within a tier, a lower-scoring SMALL store may be held over a higher-scoring large
     /// one. Across tiers it must not — so the same size/score pairing placed in different tiers
     /// inverts the outcome. Testing only the within-tier half would pass for an implementation that
     /// ignored tiers entirely.
@@ -337,7 +337,7 @@ mod tests {
         );
     }
 
-    /// SPEC §3.2: ties on profit AND size are broken randomly, so two nodes with different
+    /// SPEC §4.4: ties on profit AND size are broken randomly, so two nodes with different
     /// node-local seeds must not converge on the same stores. A deterministic tiebreak (input order,
     /// id order) returns the same answer for every seed and fails this.
     #[test]
@@ -357,7 +357,7 @@ mod tests {
         );
     }
 
-    /// SPEC §3/§3.2: randomness must not cost replayability. The SAME seed must reproduce the SAME
+    /// SPEC §4.4: randomness must not cost replayability. The SAME seed must reproduce the SAME
     /// selection exactly, or an eviction cannot be audited offline.
     #[test]
     fn the_same_seed_reproduces_the_same_selection() {
@@ -370,7 +370,7 @@ mod tests {
         assert_eq!(first, second);
     }
 
-    /// SPEC §3.2: randomness reaches ties only. Candidates that differ on size must order by size for
+    /// SPEC §4.4: randomness reaches ties only. Candidates that differ on size must order by size for
     /// EVERY seed — a shuffle applied before the objectives would break this for some seed.
     #[test]
     fn randomness_never_reaches_across_a_size_difference() {
@@ -391,7 +391,7 @@ mod tests {
         }
     }
 
-    /// SPEC §3: a pin is retained even when it alone exceeds capacity, and it consumes the budget the
+    /// SPEC §4.2: a pin is retained even when it alone exceeds capacity, and it consumes the budget the
     /// rest of the selection is offered.
     #[test]
     fn a_pin_is_retained_over_capacity_and_consumes_the_budget() {

@@ -4,7 +4,7 @@
 //! implementation is `LruPolicy`, and the relevance model this crate folds in describes itself as
 //! *"the pure brain the on-disk LRU cache **will later consult**"*. **The two were built to meet and
 //! never did.** This module is that meeting point, which is why it IMPLEMENTS the existing trait
-//! rather than designing a rival seam (SPEC §6, §8).
+//! rather than designing a rival seam (SPEC §11.1).
 //!
 //! # What changes for an operator
 //!
@@ -15,7 +15,7 @@
 //! each tier internally. That is an observable difference in which capsules survive a full cache, not
 //! a log line (SPEC §10).
 //!
-//! # SPEC §7.2 — why this policy ignores `EvictionEntry::last_access`
+//! # SPEC §7.3 — why this policy ignores `EvictionEntry::last_access`
 //!
 //! `dig-store-cache` bumps its recency stamp inside `Cache::get`, and `get` is the SAME call the
 //! serving path makes for an **inbound peer request**. On a serving node that makes `last_access` an
@@ -41,7 +41,7 @@ use crate::selection::{select_within_capacity, SelectionCandidate, SelectionSeed
 /// Eviction driven by the tier ladder and the mirror-count objective.
 ///
 /// Holds the composed [`AlgorithmSet`] that answers what tier each capsule is in, and the node-local
-/// [`SelectionSeed`] that decorrelates this node's tiebreaks from every other node's (SPEC §3.2).
+/// [`SelectionSeed`] that decorrelates this node's tiebreaks from every other node's (SPEC §4.4).
 pub struct TieredPolicy {
     algorithms: Arc<AlgorithmSet<CapsuleIdentity>>,
     seed: SelectionSeed,
@@ -62,7 +62,7 @@ impl TieredPolicy {
     }
 
     /// Turn a cache entry into a selection candidate. `entry.last_access` is deliberately dropped —
-    /// see the module docs (SPEC §7.2).
+    /// see the module docs (SPEC §7.3).
     fn candidate(&self, entry: &EvictionEntry) -> SelectionCandidate<CapsuleIdentity> {
         let facts = self.algorithms.facts_or_default(&entry.id);
         SelectionCandidate {
@@ -159,7 +159,7 @@ mod tests {
         assert_eq!(policy.select_evictions(&ctx), vec![id(0)]);
     }
 
-    /// SPEC §7.2 — the load-bearing test. Two contexts differ ONLY in `last_access`, arranged so that
+    /// SPEC §7.3 — the load-bearing test. Two contexts differ ONLY in `last_access`, arranged so that
     /// an attacker's repeated inbound requests have made THEIR capsule the hottest and the honest
     /// one the coldest. The eviction set must be identical, because this policy never reads the
     /// field. A policy that ordered on it returns a different victim for the two contexts.

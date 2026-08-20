@@ -268,6 +268,12 @@ correct, not a defect: it serves §0.1. It MUST NOT happen **across** tiers.
 An implementation MAY approximate the knapsack. It MUST NOT degenerate into **sort-by-score-and-fill**,
 which ignores the count objective entirely and is the obvious wrong implementation.
 
+**Count-optimal is not score-optimal, and that is intended.** Filling smallest-first maximises the number
+of stores held exactly, but among the sets of that same cardinality it does not maximise retained score;
+a different set of equal count may score higher. This follows §0.1 — the objective is a count of mirrors,
+"not aggregate relevance retained" — and is stated here so it is read as the contract rather than filed
+as a defect.
+
 ### 4.2 Capacity
 
 The node has a configured total allocation. Tiers claim it in descending rank order; each tier's bound is
@@ -284,7 +290,7 @@ MUST be refused rather than triggering an unsatisfiable eviction sweep.
 
 ### 4.4 Ties are broken RANDOMLY, from a seeded source
 
-**Among candidates equal on profit and equal on size, selection MUST be random.**
+**Among candidates equal on profit, equal on size, and equal on score, selection MUST be random.**
 
 **This is a network property, not a fairness gesture.** A deterministic tiebreak makes every node with a
 similar view choose the *same* stores — a few mirrored by everyone, the rest by nobody — and aggregate
@@ -299,8 +305,15 @@ Two constraints, both required:
   ties this node resolves in their favour, turning decorrelation into targeting. Node identity or local
   entropy is sound; content ids, provider counts, or anything a peer supplies is not.
 
-**Randomise only among genuine ties.** Randomness MUST NOT reach across a profit or size difference — it
-is the last step, after §0's objectives have ordered everything they can.
+**Randomise only among genuine ties.** Randomness MUST NOT reach across a profit, size, or score
+difference — it is the last step, after §0's objectives have ordered everything they can.
+
+**Score is part of the ordering, not merely of the value.** Selection is the only consumer of the score's
+ordering power: tier is decided by §2 and cardinality by size, so a tiebreak that shuffled across a score
+difference would leave §3's scoring model ordering nothing at all. §4.1 states that score is the value,
+and a value that never orders anything is not one. Decorrelation is unharmed — §3's score is dominated by
+XOR distance to **this node's own** peer id, so independent nodes already disagree on it, and the shuffle
+still resolves the genuinely identical case.
 
 ---
 

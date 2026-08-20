@@ -1,4 +1,4 @@
-//! The pluggable seam (SPEC §6) — how a candidate earns a tier, and how it scores within one.
+//! The pluggable seam (SPEC §2.4, §11A.4) — how a candidate earns a tier, and how it scores within one.
 //!
 //! The tier ladder ([`crate::tier`]) and its precedence are the **fixed frame**. What plugs in is
 //! everything above it: an [`ExchangeAlgorithm`] answers, for one store, *which tier does it hold*
@@ -15,7 +15,7 @@
 //! # How `Tier2Bribed` gets populated later, without any signature here changing
 //!
 //! The paid tier is part of the model now; the algorithm that decides who pays and what proves it is
-//! **deferred** (SPEC §2.3) and is deliberately not implemented in this crate. When it lands it is
+//! **deferred** (SPEC §2.4) and is deliberately not implemented in this crate. When it lands it is
 //! *one more* [`ExchangeAlgorithm`] added to an [`AlgorithmSet`], returning
 //! [`CacheTier::Tier2Bribed`](crate::tier::CacheTier::Tier2Bribed) for the stores it has settled
 //! payment for. It needs no new trait, no new method, and no change to eviction or selection:
@@ -24,7 +24,7 @@
 //! - **demotion on non-payment** travels the SAME channel every other source uses — the algorithm
 //!   stops claiming the store, its claim drops out of the max, and the store falls back to whatever
 //!   the remaining sources say. Non-payment therefore never has to live in private state, which is
-//!   the interface defect SPEC §2.3 exists to prevent;
+//!   the interface defect SPEC §2.4 exists to prevent;
 //! - **price, payer and settlement outcome** are that algorithm's own inputs, not this seam's. This
 //!   seam is deliberately narrow: it carries the DECISION, never the evidence behind it.
 //!
@@ -38,7 +38,7 @@ use crate::tier::{effective_tier, CacheTier, DEFAULT_TIER};
 ///
 /// There is deliberately no recency field. Recency is already a term of the relevance model
 /// (`RelevanceInputs::reads_recency_ticks`) and belongs in the score, so there is exactly one place a
-/// recency signal enters policy — and exactly one place to keep it locally attributed (SPEC §7.2).
+/// recency signal enters policy — and exactly one place to keep it locally attributed (SPEC §7.3).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StoreFacts {
     /// The tier this algorithm claims for the store.
@@ -57,7 +57,7 @@ pub trait ExchangeAlgorithm<Id>: Send + Sync {
     fn facts(&self, id: &Id) -> Option<StoreFacts>;
 }
 
-/// Several algorithms competing for one capacity budget (SPEC §6).
+/// Several algorithms competing for one capacity budget (SPEC §11A.4).
 ///
 /// The composition rule is fixed by the model and is not itself pluggable: **tier is the maximum**
 /// across claiming sources, and the score is the one belonging to the winning tier's strongest claim.
@@ -111,7 +111,7 @@ impl<Id> AlgorithmSet<Id> {
     /// [`DEFAULT_TIER`] (protected) with a zero score, so it is neither sacrificed first nor allowed
     /// to outrank a store an algorithm actually vouched for.
     ///
-    /// The zero score is the SPEC §7.1 rule made concrete: an absent value must not outrank a present
+    /// The zero score is the SPEC §8.2 rule made concrete: an absent value must not outrank a present
     /// one, so absence takes the bottom of its tier rather than the top.
     #[must_use]
     pub fn facts_or_default(&self, id: &Id) -> StoreFacts {
@@ -200,7 +200,7 @@ mod tests {
         );
     }
 
-    /// SPEC §7.1: an absent value must not outrank a present one. An unclaimed store defaults to the
+    /// SPEC §8.2: an absent value must not outrank a present one. An unclaimed store defaults to the
     /// PROTECTED tier (so it is not wrongly sacrificed) but to the BOTTOM score of that tier (so it
     /// cannot outrank a store an algorithm vouched for).
     #[test]
@@ -213,7 +213,7 @@ mod tests {
         assert!(defaulted.score.get() < composed.facts_or_default(&1).score.get());
     }
 
-    /// Nothing in this crate produces the paid tier — its algorithm is deferred (SPEC §2.3). The seam
+    /// Nothing in this crate produces the paid tier — its algorithm is deferred (SPEC §2.4). The seam
     /// must nevertheless carry it end to end, so a later algorithm is a pure addition.
     #[test]
     fn the_seam_carries_the_paid_tier_although_no_implementation_here_produces_it() {

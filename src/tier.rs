@@ -11,7 +11,7 @@
 //! store between tiers (SPEC §2.1).
 //!
 //! Everything here is pure: no clock, no network, no I/O. Time enters only as caller-supplied tick
-//! counters, so any eviction decision can be replayed and audited offline (SPEC §3).
+//! counters, so any eviction decision can be replayed and audited offline (SPEC §1.3).
 
 /// Which acquisition tier a cached entry belongs to. The tier — NOT the relevance score — decides
 /// cross-tier eviction precedence: a lower tier is always sacrificed before a higher one.
@@ -29,7 +29,7 @@ pub enum CacheTier {
     /// Retained because a backer paid to keep it resident. Sacrificed LAST.
     ///
     /// The tier is part of the model NOW; the algorithm that decides who pays, how much, and what
-    /// proves it is deliberately DEFERRED and is not implemented in this crate (SPEC §2.3). Nothing
+    /// proves it is deliberately DEFERRED and is not implemented in this crate (SPEC §2.4). Nothing
     /// in this crate produces this variant today — it is populated by an
     /// [`ExchangeAlgorithm`](crate::algorithm::ExchangeAlgorithm) implementation added later,
     /// without any signature here changing.
@@ -80,7 +80,7 @@ pub fn effective_tier(tiers: impl IntoIterator<Item = CacheTier>) -> Option<Cach
 /// ranks only within a tier during candidate selection, never during eviction (SPEC §2.1).
 ///
 /// `last_access_ticks` MUST be a LOCALLY-attributed recency signal. A stamp bumped by the same call
-/// that serves an inbound peer request makes eviction order an attacker-chosen value (SPEC §7.2); see
+/// that serves an inbound peer request makes eviction order an attacker-chosen value (SPEC §7.3); see
 /// [`crate::eviction`] for how this crate keeps that signal out of the ordering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CacheEntry {
