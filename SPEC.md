@@ -4,6 +4,41 @@
 today and is being folded into this crate. Behavioural clauses land with the implementation; the model
 and the constraints below are normative now.
 
+## 0. The objective function
+
+**Optimise for PROFIT first. Subject to that, MAXIMISE THE NUMBER OF MIRRORS within the disk allocation.**
+
+The two are **lexicographic, not weighted**: no quantity of additional mirrors justifies sacrificing paid
+retention. There is no exchange rate between them, and an implementation MUST NOT introduce one.
+
+Everything below is machinery for this. The tier ladder (§2) implements the primary objective —
+`Tier2Bribed` is sacrificed last because it is the paid tier. The relevance score (§3) and the selection
+in §3.1 implement the secondary objective within whatever capacity the primary leaves.
+
+### 0.1 The secondary objective is a COUNT, and that makes size first-class
+
+*Maximise mirrors* means maximise the **number of stores mirrored**, not the number of bytes held nor the
+aggregate relevance retained. **All else equal, many small stores beat one large store**, because each
+mirror is a unit of network usefulness regardless of its size.
+
+This is why size MUST NOT enter the relevance score: score is **value**, size is **weight**, and mixing
+them destroys the ability to select against a capacity bound. The existing model already records this
+decision — `size_bytes` is carried *"for downstream knapsack selection (later children); it does not enter
+the relevance score itself."* **This crate is that later child.**
+
+### 0.2 Two questions this specification does NOT yet answer
+
+Both are deferred deliberately, and an implementation MUST NOT settle either by accident:
+
+1. **Is profit honoured, or sought?** Retaining what has been paid for is unambiguous. Whether a node
+   should *acquire* content because it expects payment is a different behaviour with different failure
+   modes, and it is not specified here.
+2. **What counts as profit** — the accounting unit, its proof, and what makes it non-repudiable — belongs
+   with the paid-retention algorithm (§2.3) and is deferred with it.
+
+Until both are settled, an implementation MUST treat the primary objective as **"never sacrifice paid
+content to hold unpaid content"** and no more than that.
+
 ## 1. Scope
 
 `dig-sex` (Store EXchange) is the **policy layer** for exchanging DIG stores between peers, and the home
@@ -68,6 +103,44 @@ Within a tier, a store's desirability is a **score**, and the model is deliberat
 caller-supplied tick counters, so the same inputs always yield the same decision and any eviction can be
 **replayed and audited offline**. That property is load-bearing: an exchange-policy regression is
 otherwise invisible, because content still arrives, just slower and from worse peers.
+
+### 3.1 Selection is a knapsack, per tier, over residual capacity
+
+Score alone does not decide what is held. **Within a tier, selection maximises the NUMBER of stores held
+against the capacity that tier is given** — score is the value, `size_bytes` is the weight, and the bound
+is whatever capacity higher tiers did not claim (§2.1).
+
+So a lower-scoring small store MAY be held over a higher-scoring large one **within the same tier**, and
+that is correct rather than a defect: it serves §0's secondary objective. It MUST NOT happen **across**
+tiers, where precedence is absolute.
+
+An implementation MAY approximate the knapsack — an exact solution is not required — but it MUST NOT
+degenerate into "sort by score and fill", which ignores the count objective entirely and is the obvious
+wrong implementation.
+
+### 3.2 Ties are broken RANDOMLY, and the randomness is seeded
+
+**Among candidates equal on profit and equal on size, selection MUST be random.**
+
+**This is a network property, not a fairness gesture.** A deterministic tiebreak makes every node with a
+similar view choose the *same* stores — so a few stores are mirrored by everyone and others by nobody,
+and the network's aggregate coverage is far worse than the same disk spent randomly. Randomising
+decorrelates independent nodes, which is the only mechanism here that produces even coverage without any
+node coordinating with another.
+
+Two constraints make this compatible with §3's replayability, and both are required:
+
+- **The randomness MUST be seeded from node-local state, and the seed MUST be an input** — like the tick
+  counters, never drawn ambiently inside the scorer. The same inputs including the seed MUST reproduce
+  the same selection, so an eviction remains replayable and auditable offline. A decision that cannot be
+  reproduced cannot be audited, and an exchange-policy regression is invisible without that.
+- **The seed MUST NOT be derivable from peer-supplied input.** If an attacker can predict or influence
+  it, they can bias which ties this node resolves in their favour — turning a decorrelation mechanism
+  into a targeting one. Seeding from the node's own identity or local entropy is sound; seeding from
+  content ids, provider counts, or anything a peer supplies is not.
+
+**Randomise only among genuine ties.** Randomness MUST NOT reach across a profit difference or a size
+difference — it is the last step of selection, after §0's objectives have ordered everything they can.
 
 **A pinned entry MUST NOT be evicted**, and a pin MAY push a node over its configured capacity. That is
 the operator's explicit override.
@@ -166,7 +239,13 @@ that MUST be stated rather than presented as a behaviour change.
 
 An implementation conforms when:
 
-1. cross-tier precedence is absolute and no score moves a store between tiers (§2.1);
+1. paid retention is never sacrificed to hold unpaid content, and no exchange rate between the two
+   objectives exists (§0);
+2. within a tier, selection maximises the COUNT of stores held against residual capacity rather than
+   sorting by score and filling (§3.1);
+3. ties on profit and size are broken randomly, from a node-local seed that is an input and is not
+   peer-derivable (§3.2);
+4. cross-tier precedence is absolute and no score moves a store between tiers (§2.1);
 2. a store's effective tier is the maximum across its sources (§2.2);
 3. `Tier2Bribed` is expressible, and a paid-retention algorithm could be added without changing
    signatures (§2.3);
