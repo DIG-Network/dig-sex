@@ -164,7 +164,7 @@ pub fn relevance(store: &RelevanceInputs, node: &NodeContext) -> RelevanceValue 
 }
 
 /// The minimum [`xor_proximity`] a PEER-DRIVEN (inbound-demand) cache pull must clear before this
-/// node will fetch + cache + DHT-announce the demanded capsule (§7.10d, issue #2014).
+/// node will fetch + cache + DHT-announce the demanded capsule (dig-node-core `SPEC.md` §7.10d).
 ///
 /// **`0.5` = the keyspace midpoint.** A uniformly-random content id lands with proximity uniform in
 /// `[0, 1]` (median `0.5`), so this admits EXACTLY the half of the keyspace closer to this node's
@@ -201,7 +201,7 @@ pub fn relevance(store: &RelevanceInputs, node: &NodeContext) -> RelevanceValue 
 pub const INBOUND_DEMAND_MIN_PROXIMITY: f64 = 0.5;
 
 /// Whether `content_id` lies within THIS node's keyspace neighbourhood — the admission predicate the
-/// inbound-demand cache pull gates on (§7.10d, issue #2014). `true` iff the XOR proximity of
+/// inbound-demand cache pull gates on (dig-node-core `SPEC.md` §7.10d). `true` iff the XOR proximity of
 /// `content_id` to `peer_id` clears [`INBOUND_DEMAND_MIN_PROXIMITY`]. See that constant for why the
 /// bar is the coherent, ungameable "content this node is responsible for" boundary.
 #[must_use]
