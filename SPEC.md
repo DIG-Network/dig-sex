@@ -268,6 +268,12 @@ correct, not a defect: it serves §0.1. It MUST NOT happen **across** tiers.
 An implementation MAY approximate the knapsack. It MUST NOT degenerate into **sort-by-score-and-fill**,
 which ignores the count objective entirely and is the obvious wrong implementation.
 
+**Count-optimal is not score-optimal, and that is intended.** Filling smallest-first maximises the number
+of stores held exactly, but among the sets of that same cardinality it does not maximise retained score;
+a different set of equal count may score higher. This follows §0.1 — the objective is a count of mirrors,
+"not aggregate relevance retained" — and is stated here so it is read as the contract rather than filed
+as a defect.
+
 ### 4.2 Capacity
 
 The node has a configured total allocation. Tiers claim it in descending rank order; each tier's bound is
@@ -284,7 +290,7 @@ MUST be refused rather than triggering an unsatisfiable eviction sweep.
 
 ### 4.4 Ties are broken RANDOMLY, from a seeded source
 
-**Among candidates equal on profit and equal on size, selection MUST be random.**
+**Among candidates equal on profit, equal on size, and equal on score, selection MUST be random.**
 
 **This is a network property, not a fairness gesture.** A deterministic tiebreak makes every node with a
 similar view choose the *same* stores — a few mirrored by everyone, the rest by nobody — and aggregate
@@ -299,8 +305,15 @@ Two constraints, both required:
   ties this node resolves in their favour, turning decorrelation into targeting. Node identity or local
   entropy is sound; content ids, provider counts, or anything a peer supplies is not.
 
-**Randomise only among genuine ties.** Randomness MUST NOT reach across a profit or size difference — it
-is the last step, after §0's objectives have ordered everything they can.
+**Randomise only among genuine ties.** Randomness MUST NOT reach across a profit, size, or score
+difference — it is the last step, after §0's objectives have ordered everything they can.
+
+**Score is part of the ordering, not merely of the value.** Selection is the only consumer of the score's
+ordering power: tier is decided by §2 and cardinality by size, so a tiebreak that shuffled across a score
+difference would leave §3's scoring model ordering nothing at all. §4.1 states that score is the value,
+and a value that never orders anything is not one. Decorrelation is unharmed — §3's score is dominated by
+XOR distance to **this node's own** peer id, so independent nodes already disagree on it, and the shuffle
+still resolves the genuinely identical case.
 
 ---
 
@@ -585,6 +598,284 @@ reading what survives it is building on an assumption.
 
 Identifier types crossing a composed crate's public API — content and peer identifiers above all — MUST
 resolve to **one** version across the dependency graph. Two majors of one type are distinct types.
+
+---
+
+## 11A. Public API
+
+The sections above specify **behaviour**; this one pins the **surface** that realises it, so an
+independent implementation has something concrete to be built against. Where the two ever disagree, the
+behavioural clause wins and the signature is the defect.
+
+Everything named here is exported from the crate root. Types are grouped by the module that owns them.
+
+### 11A.1 The tier ladder — `tier`
+
+```rust
+pub enum CacheTier { Tier0Precache, Tier1Demand, Tier2Bribed }
+impl CacheTier { pub const fn rank(self) -> u8; }
+
+pub const DEFAULT_TIER: CacheTier;                 // Tier1Demand — the protected fail-safe
+
+pub fn effective_tier(tiers: impl IntoIterator<Item = CacheTier>) -> Option<CacheTier>;
+
+pub struct CacheEntry { pub tier: CacheTier, pub last_access_ticks: u64 }
+pub fn evict_key(entry: &CacheEntry) -> (u8, u64);
+```
+
+`rank` is ascending-evicts-first, so sorting by `evict_key` IS the eviction order (§2.1). `effective_tier`
+returns `None` when no source holds an opinion, which callers pair with `DEFAULT_TIER`; it is not
+defaulted internally so *"nobody claimed this"* stays distinguishable from *"somebody claimed the
+default"* (§2.2).
+
+### 11A.2 Relevance — `relevance`
+
+```rust
+pub struct RelevanceWeights { pub xor: f64, pub scarcity: f64, pub demand: f64,
+                              pub recency: f64, pub pin_adjacent: f64, pub pinned: f64 }
+pub struct RelevanceInputs  { pub content_id: [u8; 32], pub size_bytes: u64,
+                              pub known_provider_count: u32, pub local_read_count: u32,
+                              pub reads_recency_ticks: Option<u64>, pub is_pinned: bool,
+                              pub pin_adjacent: bool }
+pub struct NodeContext      { pub peer_id: [u8; 32], pub weights: RelevanceWeights }
+pub struct RelevanceValue(pub f64);
+
+pub fn relevance(store: &RelevanceInputs, node: &NodeContext) -> RelevanceValue;
+pub fn xor_proximity(content_id: &[u8; 32], peer_id: &[u8; 32]) -> f64;
+pub fn in_keyspace_neighbourhood(content_id: &[u8; 32], peer_id: &[u8; 32]) -> bool;
+pub const INBOUND_DEMAND_MIN_PROXIMITY: f64;       // 0.5 — the keyspace midpoint
+```
+
+`size_bytes` is carried and deliberately **not** scored (§0.1); it is the weight term selection consumes.
+`reads_recency_ticks` MUST be attributed to LOCAL reads only (§7.3).
+
+### 11A.3 Selection — `selection`
+
+```rust
+pub struct SelectionSeed(/* private */);
+impl SelectionSeed {
+    pub const fn from_node_local(value: u64) -> Self;
+    pub fn from_peer_id(peer_id: &[u8; 32]) -> Self;
+}
+
+pub struct SelectionCandidate<Id> { pub id: Id, pub tier: CacheTier, pub size_bytes: u64,
+                                    pub score: RelevanceValue, pub pinned: bool }
+pub struct Selection<Id> { pub retained: Vec<Id>, pub rejected: Vec<Id> }
+
+pub fn select_within_capacity<Id: Copy>(candidates: &[SelectionCandidate<Id>],
+                                        capacity_bytes: u64,
+                                        seed: SelectionSeed) -> Selection<Id>;
+
+pub const MIN_DISPLACEMENT_MARGIN: f64;
+pub struct DisplacementMargin(/* private */);
+impl DisplacementMargin { pub fn new(requested: f64) -> Self; pub fn get(self) -> f64; }
+pub fn may_displace(incumbent: RelevanceValue, candidate: RelevanceValue,
+                    margin: DisplacementMargin) -> bool;
+```
+
+`SelectionSeed`'s field is private and both constructors name a node-local source: a peer-supplied value
+cannot reach the tiebreak by accident (§4.4). `Selection::rejected` is returned in **eviction order**
+(lowest tier first), so it can be handed straight to eviction without a second sort that could drift.
+`DisplacementMargin` floors in its **constructor**, so no call site can hold a zero margin (§8.5).
+
+### 11A.4 The algorithm seam — `algorithm`
+
+```rust
+pub struct StoreFacts { pub tier: CacheTier, pub score: RelevanceValue }
+
+pub trait ExchangeAlgorithm<Id>: Send + Sync {
+    fn facts(&self, id: &Id) -> Option<StoreFacts>;
+}
+
+pub struct AlgorithmSet<Id>;
+impl<Id> AlgorithmSet<Id> {
+    pub fn new() -> Self;
+    pub fn with(self, source: Box<dyn ExchangeAlgorithm<Id>>) -> Self;
+    pub fn facts(&self, id: &Id) -> Option<StoreFacts>;
+    pub fn facts_or_default(&self, id: &Id) -> StoreFacts;
+}
+```
+
+**This is the whole pluggable surface** (§6): one method, answering *which tier* and *how desirable within
+it*. Composition is a maximum over claiming sources and is NOT itself pluggable, so registration order
+cannot change policy. `None` is not a demotion — it withdraws a claim, leaving the remaining sources to
+answer (§2.2).
+
+A paid-retention algorithm (§2.3) is added as one more `ExchangeAlgorithm` returning `Tier2Bribed`, with
+promotion and demotion both travelling this same composition rather than private state. No signature here
+changes to admit it.
+
+### 11A.5 Eviction — `eviction`
+
+```rust
+pub struct TieredPolicy;
+impl TieredPolicy {
+    pub fn new(algorithms: Arc<AlgorithmSet<CapsuleIdentity>>, seed: SelectionSeed) -> Self;
+}
+impl dig_store_cache::EvictionPolicy for TieredPolicy { /* select_evictions */ }
+```
+
+An implementation of `dig-store-cache`'s **existing** seam, never a rival (§11.1). It deliberately does
+not read `EvictionEntry::last_access`, which that crate bumps in `get()` — the same call the serving path
+makes for an inbound peer request, making it attacker-chosen on a serving node (§7.3).
+
+### 11A.6 Acquisition — `acquisition`
+
+```rust
+pub struct BackfillPolicy { pub enabled: bool }        // Default: enabled
+pub enum AcquisitionDecision { Acquire, SkipDisabled, SkipAlreadyHeld, SkipInFlight }
+
+pub fn decide(policy: BackfillPolicy, capsule: &CapsuleIdentity, already_held: bool,
+              in_flight: &HashSet<CapsuleIdentity>) -> AcquisitionDecision;
+```
+
+Dedup is keyed on the **capsule** — `(store_id, root_hash)` — not the store, so a newer generation is
+still acquired (§5.1). The caller performs the pull and MUST NOT block the triggering read on it.
+
+### 11A.7 Holdings — `holdings`
+
+```rust
+pub struct HoldingsDelta { pub announce: Vec<CapsuleIdentity>, pub retract: Vec<CapsuleIdentity> }
+impl HoldingsDelta { pub fn is_empty(&self) -> bool; }
+
+pub fn after_admission(admitted: CapsuleIdentity, evicted: &[CapsuleIdentity]) -> HoldingsDelta;
+pub fn after_eviction(evicted: &[CapsuleIdentity]) -> HoldingsDelta;
+pub fn reconcile(advertised: &[CapsuleIdentity], held: &[CapsuleIdentity]) -> HoldingsDelta;
+```
+
+`after_admission` takes `dig-store-cache`'s `Admission.evicted` directly. `reconcile` is the repair path
+that makes a missed retraction recoverable rather than permanent (§7.1).
+
+### 11A.8 Reward accounting — `reward`
+
+```rust
+pub struct ClaimId(pub [u8; 32]);                      // derived from the chain event
+pub struct RewardClaim { pub claim_id: ClaimId, pub store: CapsuleIdentity, pub amount: u64 }
+pub enum RecordOutcome { Recorded, AlreadyRecorded }
+
+pub struct RewardLedger;
+impl RewardLedger {
+    pub fn empty() -> Self;
+    pub fn from_chain_claims(claims: impl IntoIterator<Item = RewardClaim>) -> Self;
+    pub fn record(&mut self, claim: RewardClaim) -> RecordOutcome;
+    pub fn claimed_for(&self, store: &CapsuleIdentity) -> u64;
+    pub fn reconcile_from_chain(&mut self, claims: impl IntoIterator<Item = RewardClaim>);
+    pub fn len(&self) -> usize;
+    pub fn is_empty(&self) -> bool;
+}
+```
+
+Idempotence rests entirely on `ClaimId` being **chain-derived**; a locally-minted id differs on every
+retry and double-counts (§2A.4). `reconcile_from_chain` REPLACES rather than merges, because a merge
+preserves the uncorroborated entry reconciliation exists to remove (§2A.2/§2A.3). Persistence and
+durability are the caller's; the ledger reaches the decision core as an input (§2A.5).
+
+### 11A.9 Recursive discovery — `discovery`
+
+```rust
+pub enum Provenance { FirstHand, Hearsay }
+
+pub struct RecursionConfig { pub enabled: bool, pub fan_out: u8, pub hop_cap: u8,
+                             pub max_hearsay_answers: usize }
+impl RecursionConfig { pub fn worst_case_nodes_recruited(&self) -> u64; }   // fan_out ^ hop_cap
+impl Default for RecursionConfig { /* enabled: false */ }
+
+pub fn parse_enabled(raw: Option<&str>) -> bool;                            // fails closed
+
+pub struct InboundAsk<Peer> { pub requestor: Peer, pub hops_remaining: Option<u8> }
+pub enum ForwardRefusal { Disabled, HopBudgetSpent, UnreadableHopBudget,
+                          NoEligiblePeers, RelayBudgetSpent }
+pub enum ForwardDecision<Peer> { Forward { peers: Vec<Peer>, hops_remaining: u8 },
+                                 Refuse(ForwardRefusal) }
+
+pub fn decide_forward<Peer: Copy + PartialEq>(config: &RecursionConfig, ask: &InboundAsk<Peer>,
+                                              this_node: &Peer, known_peers: &[Peer],
+                                              relay_budget_available: bool) -> ForwardDecision<Peer>;
+
+pub fn merge_answers<Answer: Copy>(config: &RecursionConfig, first_hand: &[Answer],
+                                   hearsay: &[Answer]) -> Vec<(Answer, Provenance)>;
+```
+
+`hops_remaining: Option<u8>` makes an unreadable budget representable, which is what lets §6.1.1's refusal
+be expressed at all. `worst_case_nodes_recruited` is also the **disclosure radius** (§6.2).
+`max_hearsay_answers` caps only the forwarded portion, so a flood cannot evict a first-hand answer
+(§6.1.6).
+
+### 11A.10 Peer conduct — `conduct`
+
+```rust
+pub enum ConductEvidence { ProvenLie, SelfContradiction, NonPerformance, HonestAnswer }
+impl ConductEvidence { pub const fn is_verifiable(self) -> bool; }
+
+pub struct ConductRecord { pub proven_faults: u32, pub non_performance: u32,
+                           pub last_update_ticks: u64 }
+impl ConductRecord { pub fn neutral() -> Self; }
+
+pub const NON_PERFORMANCE_PENALTY: u32;
+pub const NON_PERFORMANCE_CEILING: u32;
+pub const NON_PERFORMANCE_DECAY_TICKS: u64;
+pub const MIN_NON_PERFORMANCE_DIAL_SHARE: f64;         // > 0, so recovery stays demonstrable
+
+pub fn observe(record: ConductRecord, evidence: ConductEvidence, now_ticks: u64) -> ConductRecord;
+pub fn decay(record: ConductRecord, now_ticks: u64) -> ConductRecord;
+pub fn dial_share(record: ConductRecord) -> f64;
+```
+
+`ConductEvidence` is this crate's **own local, peer-scoped** type. It records what a peer did to this node
+and carries no on-chain authority; it MUST NOT be replaced by an L2 evidence type to borrow one.
+
+There is deliberately **no** constructor taking another peer's assessment, and no serialisation of one:
+reputation is local, and gossiped reputation is a defamation primitive (§8.2A). `dial_share` only ever
+demotes — no input raises a peer's share (§8.1).
+
+### 11A.11 Load admission — `admission`
+
+```rust
+pub struct AuthenticatedPeer(/* private */);
+impl AuthenticatedPeer { pub const fn from_verified_session(peer_id: [u8; 32]) -> Self; }
+
+pub enum WorkKind { Own, Relayed }
+pub enum Refusal { GlobalCeiling, PeerShare, RelayBudget, MeterFull, RequestTooLarge }
+
+pub struct AdmissionLimits { pub global_ceiling: u32, pub per_peer_share: u32,
+                             pub relay_ceiling: u32, pub max_tracked_peers: usize,
+                             pub max_request_units: u32 }
+
+pub struct AdmissionMeter;
+impl AdmissionMeter {
+    pub fn new(limits: AdmissionLimits) -> Self;
+    pub fn admit(&mut self, peer: AuthenticatedPeer, kind: WorkKind,
+                 requested_units: u32) -> Result<(), Refusal>;
+    pub fn release(&mut self, peer: AuthenticatedPeer, kind: WorkKind);
+    pub fn in_flight_total(&self) -> u32;
+}
+```
+
+`AuthenticatedPeer`'s field is private and its only constructor names what it asserts, so the
+shared-placeholder-bucket failure of §8.5.2 is **unrepresentable** rather than merely discouraged.
+`admit` is called BEFORE the work, and clamps `requested_units` at the boundary (§8.5.1, §8.5.7).
+
+### 11A.12 Error taxonomy
+
+This crate returns **no** `Error` type, and that is deliberate: it decides, it does not perform. Every
+failure it can express is a *decision outcome* with a named, exhaustive, stable set of reasons —
+`AcquisitionDecision`, `ForwardRefusal`, `Refusal`, `RecordOutcome` — and each variant states the ONE
+condition that produced it, so an operator can tell which bound was reached (§10).
+
+I/O errors belong to the crates that perform the I/O: `dig-store-cache::CacheError` for admission
+mechanics, `dig-download` for byte movement, `dig-dht` for announce and retract. This crate MUST NOT wrap
+or restate them.
+
+### 11A.13 What is NOT in the surface, and why
+
+- **No `Tier2Bribed` producer.** The paid tier is carried end to end and nothing here populates it; the
+  algorithm is deferred (§2.3).
+- **No price, payer, or settlement type.** Those belong to that algorithm, whose accounting unit is
+  unspecified (§0.2).
+- **No verification.** Content is accepted because it verifies against its chain anchor, elsewhere (§5.2).
+- **No clock, no RNG, no filesystem, no socket.** Ticks, seeds and persisted state are all inputs (§1.3).
+- **No identifier type of its own.** `CapsuleIdentity` is re-exported from `dig-store-cache`, so the graph
+  holds one version (§11.3).
 
 ---
 
