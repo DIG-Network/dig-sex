@@ -82,7 +82,10 @@ impl EvictionPolicy for TieredPolicy {
     /// a pin can only ever appear in the retained set. That upholds the invariant `dig-store-cache`
     /// relies on and does not re-check.
     ///
-    /// Every returned capsule is also an **advertising retraction** — see [`crate::holdings`].
+    /// Every returned capsule is **owed** an advertising retraction (SPEC §7.1) — but that coupling
+    /// is the caller's discipline, not this signature's guarantee. `dig-store-cache` owns the return
+    /// type, so no delta can be returned here; a caller MUST pass this set through
+    /// [`crate::holdings::after_eviction`] and act on the result. `dig-node` does (dig-node#280).
     fn select_evictions(&self, ctx: &EvictionContext<'_>) -> Vec<CapsuleIdentity> {
         if ctx.bytes_to_free() == 0 {
             return Vec::new();

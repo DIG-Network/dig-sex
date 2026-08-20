@@ -90,9 +90,16 @@ pub struct CacheEntry {
     pub last_access_ticks: u64,
 }
 
-/// The eviction sort key. Sorting entries by this key **ascending** evicts in exactly the right
-/// order: all `Tier0` (oldest first), then all `Tier1` (oldest first), then all `Tier2` (oldest
-/// first) — precedence tier2 > tier1 > tier0, with LRU inside each tier.
+/// The reference eviction sort key. Sorting entries by this key **ascending** yields all `Tier0`
+/// (oldest first), then all `Tier1` (oldest first), then all `Tier2` (oldest first) — precedence
+/// tier2 > tier1 > tier0, with LRU inside each tier.
+///
+/// **This is not the order this crate evicts in.** [`TieredPolicy`](crate::eviction::TieredPolicy)
+/// reaches eviction through [`select_within_capacity`](crate::selection::select_within_capacity),
+/// which walks the tiers in a fixed descending order and orders within a tier by size and score, not
+/// by `last_access_ticks` — a recency signal is attacker-drivable on a serving node (SPEC §7.3). Use
+/// this key for a cache that does carry a trustworthy LOCAL-read recency; do not read it as a
+/// description of the policy above.
 #[must_use]
 pub fn evict_key(entry: &CacheEntry) -> (u8, u64) {
     (entry.tier.rank(), entry.last_access_ticks)
