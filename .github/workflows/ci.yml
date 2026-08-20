@@ -37,7 +37,10 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Check clippy
-        run: cargo clippy --all-targets -- -D warnings
+        # --workspace --all-features so CI runs the SAME invocation as the merge gate. A no-op
+        # while this is a single crate with no features, which is exactly when the drift is cheap
+        # to fix and invisible to catch later.
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Build (release)
         run: cargo build --release
