@@ -388,6 +388,72 @@ be no.
 an **absent** value does, and **an absent value MUST NOT outrank a present one**. A guard whose rationale
 names a *behaviour* is walked past by a peer that declines to exhibit it.
 
+### 8.2A Peer conduct: a claim that is not honoured
+
+A peer that **claims to hold content and then does not deliver it** is evidence — but evidence of *what*
+depends entirely on **how** it failed, and an implementation MUST NOT collapse the cases.
+
+**This is the distinction between a malicious peer and a distressed honest one, and it is the whole
+problem.** A peer that lies and a peer that is overloaded, rate-limited, half-partitioned, or mid-restart
+produce the *same* observable at the transport layer: nothing arrived.
+
+#### Three classes, only two of which are verifiable
+
+| class | what happened | verifiable? |
+|---|---|---|
+| **Proven lie** | delivered bytes that fail verification against the chain-anchored root | **YES** — arithmetic, not judgement |
+| **Self-contradiction** | claimed to hold it, then answered a direct request for it with an absence | **YES** — the peer contradicted its own claim |
+| **Non-performance** | timeout, reset, silence, truncation, or persistent slowness | **NO** — indistinguishable from distress |
+
+**Only the two verifiable classes MAY carry a durable penalty.** They are facts about what the peer said
+and did, checkable without trusting anyone.
+
+**Non-performance MUST NOT.** It is the signal §8.3 forbids persisting, and the reason is not caution but
+a measured attack: an exclusion driven by non-delivery lets peers that withhold assigned chunks brand an
+**honest** holder until only attacker-supplied candidates are ever asked for.
+
+#### An attacker can manufacture distress in a THIRD party
+
+This is the constraint that shapes everything else. An adversary who can degrade an honest peer — by load,
+by occupying its connection slots, by partitioning it — can make that peer *look* unreliable to everyone
+else. **A non-performance penalty is therefore not merely unreliable, it is weaponisable against a peer
+the attacker does not control.**
+
+Consequently:
+
+1. **Non-performance penalties MUST decay with time**, on the same monotonic tick basis as everything else
+   (§1.2), so a distressed peer recovers **without intervention and without needing to prove anything**.
+2. **A non-performance penalty MUST NOT reduce a peer's dial share to zero.** A peer that can never be
+   retried can never demonstrate recovery, which converts a transient penalty into the permanent exclusion
+   this section exists to prevent.
+3. **The penalty MUST be cheap enough that inducing it is not worth an attacker's effort.** If degrading a
+   competitor is cheaper than serving content, the reputation system has become the attack surface.
+
+#### Dial budget
+
+Conduct history MAY order dial preference — spending fewer attempts on peers that have historically not
+delivered — subject to §8.1: it MAY **demote on evidence** and MUST NOT **promote on a declaration**. A
+peer's own claims about its capacity, uptime, or holdings MUST NOT raise its dial share.
+
+**Silence MUST NOT be cheaper than answering honestly.** A peer that declines to respond MUST NOT thereby
+rank better than one that answers "I do not have it" (§8.2).
+
+#### Reputation is LOCAL and MUST NOT be gossiped as fact
+
+Conduct records are this node's own observations. An implementation MUST NOT accept another peer's
+assessment of a third party as evidence, and MUST NOT publish its own as an assertion about them.
+
+Gossiped reputation is a defamation primitive: it lets an attacker degrade a peer everywhere at once
+without ever interacting with it, and it cannot be verified by the recipient. **A peer's misconduct is
+demonstrated to this node by that peer, or it is not demonstrated.**
+
+#### Persistence
+
+Conduct state that persists MUST follow §2A.5: it is I/O, so it enters the decision core as a
+**caller-supplied input**, never read or written by the core itself. It MUST be bounded per §8.4 — it is
+keyed by peer identity, which is attacker-supplied — and an unreadable record MUST fail to the
+**neutral** state, never to a penalised one, or losing a file becomes an exclusion.
+
 ### 8.3 Exclusion
 
 **A durable, cross-transfer exclusion MUST NOT rest on a signal that cannot distinguish a lie from a
@@ -488,6 +554,12 @@ An implementation conforms when:
 16. no recency signal used for eviction is drivable by inbound requests (§7.3);
 17. no ordering input a peer supplies can promote a candidate, and every absent value is specified
     (§8.1, §8.2);
+17a. a peer's failure to honour a claim is classified as proven lie, self-contradiction, or
+     non-performance; only the first two carry durable penalties; non-performance decays on a tick basis,
+     never reduces a dial share to zero, and is cheap enough that inducing it is not worth an attacker's
+     effort (§8.2A);
+17b. reputation is local: no third party's assessment is accepted as evidence and none is published as an
+     assertion (§8.2A);
 18. no durable exclusion rests on a signal that cannot distinguish a lie from a transport failure (§8.3);
 19. all state keyed by untrusted input is bounded (§8.4);
 20. every configuration switch has a stated default and fails to the safe setting (§9);
