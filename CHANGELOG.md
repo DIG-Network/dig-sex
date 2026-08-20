@@ -1,3 +1,12 @@
 # Changelog
 
-Managed by `git-cliff`; do not hand-edit.
+All notable changes to this project are documented here.
+This project adheres to [Semantic Versioning](https://semver.org) and
+[Conventional Commits](https://www.conventionalcommits.org).
+
+## [0.1.0] - 2026-08-20
+
+### Chores
+- Scaffold dig-sex (Store EXchange)
+
+
