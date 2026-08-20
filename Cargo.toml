@@ -1,6 +1,6 @@
 [package]
 name = "dig-sex"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Store EXchange: the centralized policy layer for exchanging DIG stores between peers, with pluggable exchange algorithms"
 license = "MIT OR Apache-2.0"
@@ -10,3 +10,9 @@ keywords = ["dig", "p2p", "exchange", "store", "replication"]
 categories = ["network-programming"]
 
 [dependencies]
+# The on-disk cache MECHANICS this crate supplies the DECISIONS for. Brings the pluggable
+# `EvictionPolicy` seam that `TieredPolicy` implements (SPEC §6/§8 — implement the existing seam,
+# never build a rival) and, transitively, the ONE `dig_store::CapsuleIdentity` the ecosystem speaks.
+# Depending on it here and re-exporting that type is what keeps a second major of `dig-store` out of
+# the graph (SPEC §9): this crate declares no identifier type of its own.
+dig-store-cache = "0.1"
