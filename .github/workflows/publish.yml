@@ -75,19 +75,21 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: "dig-did v${{ steps.extract_version.outputs.VERSION }}"
+          name: "dig-sex v${{ steps.extract_version.outputs.VERSION }}"
           body: |
-            ## dig-did v${{ steps.extract_version.outputs.VERSION }}
+            ## dig-sex v${{ steps.extract_version.outputs.VERSION }}
 
-            The DIG Network canonical Chia DID expert crate: a pure, key-free, network-free
-            SpendBundle-builder for Chia Decentralized Identifiers. Builds the exact CoinSpends for
-            every DID lifecycle operation and reports the exact signatures a caller must produce —
-            never holds a key, never signs, never broadcasts.
+            Store EXchange: the policy layer that decides which DIG stores this node holds,
+            in what order it sheds them, and which peers are worth dialling. Profit first;
+            subject to that, the largest NUMBER of mirrors that fits the disk allocation.
+            Exchange algorithms are pluggable, so a paid-retention tier is one more
+            registration rather than a redesign. Pure decisions -- no clocks, no sockets,
+            no filesystem.
 
             ### Installation
             ```toml
             [dependencies]
-            dig-did = "${{ steps.extract_version.outputs.VERSION }}"
+            dig-sex = "${{ steps.extract_version.outputs.VERSION }}"
             ```
           draft: false
           prerelease: false
