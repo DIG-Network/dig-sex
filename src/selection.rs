@@ -194,6 +194,60 @@ const fn mix64(mut x: u64) -> u64 {
     x ^ (x >> 31)
 }
 
+/// The smallest displacement margin this crate will honour (SPEC §3.2, §8.5).
+///
+/// **A zero margin is a denial-of-service vector, not merely an inefficiency.** Without a margin, two
+/// near-equal candidates displace each other on every sweep, and a peer able to drive admission can
+/// spend this node's disk bandwidth indefinitely while producing no net change in what is held.
+pub const MIN_DISPLACEMENT_MARGIN: f64 = 0.01;
+
+/// A displacement margin, floored so it can never be configured to zero.
+///
+/// The floor is applied in the CONSTRUCTOR rather than at the comparison, so there is no way to hold a
+/// zero-margin value at all — a check at the point of use can be bypassed by a second call site, and
+/// this rule has to hold for every one of them.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct DisplacementMargin(f64);
+
+impl DisplacementMargin {
+    /// Build a margin, raising anything below [`MIN_DISPLACEMENT_MARGIN`] (including zero, a negative
+    /// value, or NaN) to the floor.
+    #[must_use]
+    pub fn new(requested: f64) -> Self {
+        if requested.is_finite() && requested > MIN_DISPLACEMENT_MARGIN {
+            Self(requested)
+        } else {
+            Self(MIN_DISPLACEMENT_MARGIN)
+        }
+    }
+
+    /// The effective margin.
+    #[must_use]
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
+impl Default for DisplacementMargin {
+    fn default() -> Self {
+        Self::new(MIN_DISPLACEMENT_MARGIN)
+    }
+}
+
+/// Whether `candidate` may displace `incumbent` from a full cache, under an unbypassable margin.
+///
+/// Wraps [`crate::relevance::should_displace`] so no call site can supply a raw zero. Scores are only
+/// comparable within one tier, so callers MUST NOT use this across tiers — cross-tier precedence is
+/// absolute and is decided by the ladder, never by a score comparison (SPEC §2.1).
+#[must_use]
+pub fn may_displace(
+    incumbent: RelevanceValue,
+    candidate: RelevanceValue,
+    margin: DisplacementMargin,
+) -> bool {
+    crate::relevance::should_displace(incumbent, candidate, margin.get())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,5 +442,44 @@ mod tests {
             SelectionSeed::from_peer_id(&[1u8; 32]),
             SelectionSeed::from_peer_id(&[2u8; 32])
         );
+    }
+
+    /// SPEC §3.2/§8.5: the margin can never be zero, however it is configured. Zero, negative and NaN
+    /// all raise to the floor — a check written only against `0.0` misses the other two, and each is a
+    /// value a configuration file can actually produce.
+    #[test]
+    fn the_displacement_margin_can_never_be_configured_to_zero() {
+        for requested in [0.0, -1.0, f64::NAN, f64::NEG_INFINITY] {
+            assert_eq!(
+                DisplacementMargin::new(requested).get(),
+                MIN_DISPLACEMENT_MARGIN,
+                "{requested} must raise to the floor"
+            );
+        }
+        assert!(DisplacementMargin::default().get() > 0.0);
+    }
+
+    /// A margin above the floor is honoured — the control. Without it, an implementation that always
+    /// returned the floor would pass the test above.
+    #[test]
+    fn a_margin_above_the_floor_is_honoured() {
+        assert_eq!(DisplacementMargin::new(0.5).get(), 0.5);
+    }
+
+    /// The floored margin is what actually gates displacement: a candidate inside the band stays out
+    /// even when the caller asked for no margin at all, which is the churn loop this prevents.
+    #[test]
+    fn a_zero_margin_request_still_blocks_a_marginal_displacement() {
+        let margin = DisplacementMargin::new(0.0);
+        assert!(!may_displace(
+            RelevanceValue(1.0),
+            RelevanceValue(1.0 + MIN_DISPLACEMENT_MARGIN / 2.0),
+            margin
+        ));
+        assert!(may_displace(
+            RelevanceValue(1.0),
+            RelevanceValue(1.0 + MIN_DISPLACEMENT_MARGIN * 2.0),
+            margin
+        ));
     }
 }

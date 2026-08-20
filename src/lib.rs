@@ -21,6 +21,18 @@
 //! | [`eviction`] | the above, wired into `dig-store-cache`'s existing eviction seam |
 //! | [`acquisition`] | a remotely-satisfied read creates relevance and warms the whole capsule |
 //! | [`holdings`] | every eviction is also an advertising retraction |
+//! | [`reward`] | the per-store ledger of rewards claimed, which the deferred claim mechanism writes to |
+//! | [`discovery`] | recursive ask on an inbound miss, bounded and off by default |
+//! | [`conduct`] | peer conduct: a malicious peer separated from a distressed honest one |
+//! | [`admission`] | inbound load admitted before the work is done, metered per authenticated peer |
+//!
+//! ## Purity, and why it is load-bearing
+//!
+//! The decision core takes no clock, no network, no filesystem and no ambient randomness. Time enters
+//! as caller-supplied monotonic ticks, randomness as a caller-supplied seed, and persisted state — the
+//! reward ledger, conduct records — as caller-supplied inputs. An exchange-policy regression is
+//! otherwise invisible, because content still arrives, just slower and from worse peers; every
+//! decision here is replayable and auditable offline from its recorded inputs.
 //!
 //! ## What this crate is deliberately not
 //!
@@ -55,22 +67,33 @@
 #![warn(missing_docs)]
 
 pub mod acquisition;
+pub mod admission;
 pub mod algorithm;
+pub mod conduct;
+pub mod discovery;
 pub mod eviction;
 pub mod holdings;
 pub mod relevance;
+pub mod reward;
 pub mod selection;
 pub mod tier;
 
 pub use acquisition::{AcquisitionDecision, BackfillPolicy};
+pub use admission::{AdmissionLimits, AdmissionMeter, AuthenticatedPeer, Refusal, WorkKind};
 pub use algorithm::{AlgorithmSet, ExchangeAlgorithm, StoreFacts};
+pub use conduct::{ConductEvidence, ConductRecord};
+pub use discovery::{ForwardDecision, ForwardRefusal, InboundAsk, Provenance, RecursionConfig};
 pub use eviction::TieredPolicy;
 pub use holdings::HoldingsDelta;
 pub use relevance::{
     relevance, NodeContext, RelevanceInputs, RelevanceValue, RelevanceWeights,
     INBOUND_DEMAND_MIN_PROXIMITY,
 };
-pub use selection::{select_within_capacity, Selection, SelectionCandidate, SelectionSeed};
+pub use reward::{ClaimId, RecordOutcome, RewardClaim, RewardLedger};
+pub use selection::{
+    may_displace, select_within_capacity, DisplacementMargin, Selection, SelectionCandidate,
+    SelectionSeed,
+};
 pub use tier::{effective_tier, evict_key, CacheEntry, CacheTier, DEFAULT_TIER};
 
 /// The capsule identity every DIG surface speaks, re-exported so a consumer of this crate never
