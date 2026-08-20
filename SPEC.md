@@ -70,27 +70,38 @@ It MUST NOT become a transport, a discovery mechanism, a fetcher, or a verifier:
 ### 1.2 Dependencies
 
 `dig-sex` sits at **40-application**, so it may depend on any lower level and MUST NOT be depended upon by
-one. Every crate below is an existing ecosystem crate; **this crate MUST use them rather than
-re-implement their behaviour** (§11.1). Versions are the levels present at the time of writing and MUST
-be resolved to a single set across the graph (§11.3).
+one. Versions MUST resolve to a single set across the graph (§11.3).
+
+**This crate depends on exactly one ecosystem crate**, and a reader looking for where a behaviour lives
+MUST be able to trust that:
 
 | crate | level | version | why |
 |---|---|---|---|
-| `dig-constants` | 00 | 0.9.0 | shared constants; MUST NOT hardcode a value that lives here |
-| `dig-pex` | 00 | 0.1.1 | peer records and the first-hand/second-hand provenance distinction |
-| `dig-peer-protocol` | 00 | 0.6.0 | the peer opcode surface the recursive ask rides (§6.1) |
-| `dig-chainsource-interface` | 00 | 0.2.0 | chain reads for reconciling the reward ledger (§2A.2) |
-| `dig-nat` | 10 | 0.19.0 | peer identity and transport types crossing composed APIs (§11.3) |
-| `dig-capsule` | 10 | 0.5.0 | the capsule identity acquired whole on a read-triggered fetch (§5.1) |
-| `dig-dht` | 20 | 0.12.0 | provider discovery, announce and **retract** (§7.1) |
-| `dig-peer` | 20 | 0.10.0 | the peer abstraction the exchange dials |
-| `dig-download` | 30 | 0.15.0 | byte movement, ranges, resume |
-| `dig-peer-selector` | 30 | 0.9.0 | peer selection — **compose it, do not replace it** |
-| `dig-store-cache` | 30 | 0.1.1 | on-disk admission/eviction mechanics, and the eviction-policy seam this crate implements (§11.1) |
+| `dig-store-cache` | 30 | 0.1 | on-disk admission/eviction mechanics, the eviction-policy seam this crate implements (§11.1), and the one `CapsuleIdentity` the ecosystem speaks (§11.3) |
+
+**Everything else in the exchange lifecycle is the CALLER's dependency, not this crate's.** §1.3 makes the
+decision core pure — no clock, no network, no filesystem — so the crates that discover providers
+(`dig-dht`), exchange peer records (`dig-pex`), carry the recursive ask (`dig-peer-protocol`), dial peers
+(`dig-peer`, `dig-nat`), move bytes (`dig-download`) and read chain (`dig-chainsource-interface`) are
+composed by the **host** around this crate's answers. This crate names them (§1.1) to say what it does
+NOT do; naming one here has never meant it is linked. A host MUST supply their results as inputs.
+
+**Two behaviours ARE re-implemented here that an ecosystem crate owns, and that is a defect, not a
+design.** They are recorded so nobody reads §11.1 as satisfied when it is not:
+
+| here | owner it belongs to | status |
+|---|---|---|
+| `relevance::xor_proximity` — keyspace distance over the top 128 bits | `dig-dht` (20) — `Key::distance` | hand-rolled; adoption tracked |
+| `conduct::dial_share` — a peer's share of dial attempts | `dig-peer-selector` (30) — *compose it, do not replace it* | hand-rolled; adoption tracked |
+
+Adopting them is a real dependency change with a real blast radius and MUST be done deliberately, not as
+a side effect of a documentation correction. Until it lands, **the authoritative definition of each of
+those two behaviours is the code in THIS crate**, and a reader MUST NOT go looking for it in the owner
+crate. Tracking: https://github.com/DIG-Network/dig-sex/issues/7.
 
 **Deferred, pending the payment specification:** `dig-mirror-coin` (10, 0.3.0) locks $DIG as collateral to
 advertise a mirror, and is the expected source of **stake evidence** for §2.4's paid-retention input. It
-MUST NOT be wired until that specification exists, and stake MUST arrive as an input (§2.4.2), never be
+MUST NOT be wired until that specification exists, and stake MUST arrive as an input (§2.4, requirement 2), never be
 asserted by this crate.
 
 **Not a dependency of this crate:** `dig-logging` is required of DIG service **binaries**, not libraries.
@@ -157,8 +168,13 @@ renumbering cannot silently repoint existing tags.
 The paid tier is part of the model **now**. The algorithm deciding who pays, how much, and what proves it
 is **deferred** and MUST NOT be invented here.
 
-The seam MUST admit it later **without signature changes**. A paid-retention implementation MUST be able
-to:
+**Nothing in this crate produces `Tier2Bribed`, and nothing outside it does either.** The ladder that
+executes is two-tier: `Tier0Precache` and `Tier1Demand`. §0's *optimise for profit first* therefore holds
+**vacuously** today — it is a total order over tiers with no member in the paying one, so it constrains
+nothing until the paid tier is built. This is the expected state, and it is stated so a reader does not
+mistake a vacuous guarantee for an exercised one.
+
+The seam MUST admit a paid-retention algorithm later. A paid-retention implementation MUST be able to:
 
 1. **read a price** — a value it cannot read is one it cannot price against;
 2. **receive stake or payment evidence as an INPUT**, never assert it on the way out;
@@ -167,6 +183,25 @@ to:
 4. **meter a MONEY budget distinct from a byte budget.**
 
 A seam that cannot express all four does not conform, however well it expresses relevance.
+
+**The current seam expresses two of the four, so it does NOT yet conform.** What holds today:
+
+- **Requirements 2 and 3 hold, by construction.** A payment algorithm is one more `ExchangeAlgorithm`.
+  Its evidence is its own input and never leaves through `StoreFacts`; withdrawing a claim (`None`)
+  demotes through the same maximum composition every other source uses (§2.2), so non-payment never has
+  to live in private state.
+- **Requirement 1 does not hold at the seam.** `ExchangeAlgorithm::facts(&self, id: &Id)` carries no
+  price channel. An algorithm may price internally against inputs it was constructed with, but a price
+  is not readable BY the seam, so no other participant — selection above all — can see one.
+- **Requirement 4 does not hold at all.** `select_within_capacity(candidates, capacity_bytes: u64, seed)`
+  meters exactly one budget and it is bytes. There is no money budget, distinct or otherwise, and one
+  cannot be expressed without changing that signature.
+
+So the honest claim, which supersedes any earlier claim that no signature changes are needed: **tier
+promotion and demotion are already pluggable and need no signature change; metering money is not, and
+will require one.** The expected shape of that change is a second budget alongside `capacity_bytes` and
+a price on the algorithm's claim, both of which are additive to types this crate owns — which is why the
+deferral is safe, not why the requirement is already met.
 
 ---
 
@@ -185,6 +220,14 @@ without redesigning the store.
 The record MUST survive process restart and MUST be durable against crash. A reward claimed and then lost
 is money the operator earned and cannot see; a ledger that only exists in memory turns every restart into
 an unnoticed loss.
+
+**This clause is UNSATISFIED end to end today, and not merely delegated.** `RewardLedger` is an in-memory
+`HashMap` behind a private field, with no serialisation and no accessor over its entries; `reward.rs`
+assigns persistence to the caller, but a caller cannot in fact write the ledger out. §2A.2's
+`from_chain_claims` rebuild is the only path back to a populated ledger, which means every restart
+currently depends on a chain re-read that no consumer performs. Until a durable form exists, a node's
+reward record does not survive a restart. Making it serialisable is a public-API change and MUST be
+specified here before it is built: https://github.com/DIG-Network/dig-sex/issues/8.
 
 ### 2A.2 The chain is authoritative; the ledger is a local view
 
@@ -398,6 +441,14 @@ advertised as a holding; the provider record and the holdings announcement follo
 A node that evicts without retracting advertises content it cannot serve, spending other nodes' dial
 budget on a guaranteed miss.
 
+**This is a CALLER obligation, not a structural guarantee of the eviction API.**
+`EvictionPolicy::select_evictions` returns a bare `Vec<CapsuleIdentity>` and cannot return a
+`HoldingsDelta`, because its signature belongs to `dig-store-cache` (§11.1 — implement the seam, never
+build a rival). A caller therefore MUST pass the returned set through `holdings::after_eviction` and act
+on the retraction; a caller that drops it satisfies the type system and violates this clause. §7.4's
+`reconcile` exists precisely because that discipline can lapse, and it is what makes a missed retraction
+repairable rather than permanent.
+
 ### 7.2 Eviction order
 
 Victims are chosen by `(tier rank ascending, then within-tier selection)`. A policy MUST NOT select a
@@ -607,7 +658,9 @@ The sections above specify **behaviour**; this one pins the **surface** that rea
 independent implementation has something concrete to be built against. Where the two ever disagree, the
 behavioural clause wins and the signature is the defect.
 
-Everything named here is exported from the crate root. Types are grouped by the module that owns them.
+Everything named here is reachable from the crate root, and also from its owning module — both paths are
+public and both are stable. Items are grouped below by the module that owns them; where a bare name is
+generic out of context (`decide`, `observe`, `decay`), the module path reads better and is preferred.
 
 ### 11A.1 The tier ladder — `tier`
 
@@ -623,7 +676,15 @@ pub struct CacheEntry { pub tier: CacheTier, pub last_access_ticks: u64 }
 pub fn evict_key(entry: &CacheEntry) -> (u8, u64);
 ```
 
-`rank` is ascending-evicts-first, so sorting by `evict_key` IS the eviction order (§2.1). `effective_tier`
+`rank` is ascending-evicts-first, so sorting entries by `evict_key` yields the tier precedence of §2.1
+with LRU inside each tier. **It is not the order a node running this crate actually evicts in.**
+`TieredPolicy` (§11A.5) reaches eviction through `select_within_capacity`, which walks the tiers in fixed
+descending order and orders WITHIN a tier by size and score (§4.1) — never by `last_access_ticks`, because
+a recency signal is attacker-drivable on a serving node (§7.3). `evict_key` is the reference ordering for
+an implementation whose cache does carry a trustworthy local-read recency; a reader MUST NOT read it as a
+description of this crate's own eviction path.
+
+`effective_tier`
 returns `None` when no source holds an opinion, which callers pair with `DEFAULT_TIER`; it is not
 defaulted internally so *"nobody claimed this"* stays distinguishable from *"somebody claimed the
 default"* (§2.2).
@@ -701,9 +762,11 @@ it*. Composition is a maximum over claiming sources and is NOT itself pluggable,
 cannot change policy. `None` is not a demotion — it withdraws a claim, leaving the remaining sources to
 answer (§2.2).
 
-A paid-retention algorithm (§2.3) is added as one more `ExchangeAlgorithm` returning `Tier2Bribed`, with
-promotion and demotion both travelling this same composition rather than private state. No signature here
-changes to admit it.
+A paid-retention algorithm (§2.4) is added as one more `ExchangeAlgorithm` returning `Tier2Bribed`, with
+promotion and demotion both travelling this same composition rather than private state. **No signature
+here changes to admit that much** — but this seam carries no price, and §11A.3's `select_within_capacity`
+meters no money budget, so §2.4's requirements 1 and 4 are not yet met by any signature in this document.
+See §2.4 for exactly which of the four hold.
 
 ### 11A.5 Eviction — `eviction`
 
@@ -868,8 +931,8 @@ or restate them.
 
 ### 11A.13 What is NOT in the surface, and why
 
-- **No `Tier2Bribed` producer.** The paid tier is carried end to end and nothing here populates it; the
-  algorithm is deferred (§2.3).
+- **No `Tier2Bribed` producer.** The paid tier is carried end to end and nothing here populates it — nor
+  does any consumer; the algorithm is deferred (§2.4).
 - **No price, payer, or settlement type.** Those belong to that algorithm, whose accounting unit is
   unspecified (§0.2).
 - **No verification.** Content is accepted because it verifies against its chain anchor, elsewhere (§5.2).
@@ -928,3 +991,17 @@ An implementation conforms when:
 22. no behaviour owned by a composed crate is re-implemented, and identifier types resolve to one version
     (§11);
 23. the decision core is pure and every decision is replayable offline from recorded inputs (§1.3).
+
+### 12.1 Where THIS crate does not yet conform
+
+The list above is the bar, not a claim about the current implementation. Measured against the code, three
+items are open, and each is stated at its own clause so the gap is visible where a reader meets it:
+
+| item | state | see |
+|---|---|---|
+| 6 — the paid-retention seam | requirements 2 and 3 hold; 1 and 4 need a signature change | §2.4 |
+| 6a — the reward ledger | in-memory only; no persisted form exists to be durable | §2A.1 |
+| 22 — no re-implementation | `xor_proximity` and `dial_share` duplicate crates that own them | §1.2 |
+
+Item 1 (*paid retention is never sacrificed*) holds **vacuously**: nothing produces `Tier2Bribed`, so the
+lexicographic order has no member in its first rank (§2.4).
