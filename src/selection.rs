@@ -283,10 +283,19 @@ pub struct Selection<Id> {
 ///   `total_cmp`), so it is ranked, not dropped, and not treated as equal to everything.
 ///
 /// For finite scores this is the same ordering as before, with one documented exception: `total_cmp`
-/// orders `-0.0` before `+0.0` where `partial_cmp` calls them equal. That pair cannot arise between an
-/// incumbent and a challenger — a resident's contested score is `score + margin` with a positive
-/// margin, which yields `+0.0` even for the score that cancels it — so it can only order two
-/// zero-scored challengers, whose order was previously decided by the seeded shuffle.
+/// orders `-0.0` before `+0.0` where `partial_cmp` calls them equal.
+///
+/// That pair can occur as a resident against a challenger, or between two challengers. A resident is
+/// never the `-0.0` side — its contested score is `score + margin` with a positive margin, and
+/// IEEE-754 gives `x + (-x) = +0.0` — but a challenger carries its score through unshifted, and
+/// `RelevanceValue` wraps a public `f64`, so a challenger CAN be `-0.0`.
+///
+/// It changes no outcome either way. Against a challenger the resident's `+0.0` sorts first, which is
+/// exactly where the incumbent-before-challenger tiebreak below already placed it — `total_cmp`
+/// reaches that answer one tiebreak earlier. Between two zero-scored challengers it replaces what was
+/// a seeded coin toss.
+///
+/// The tiebreak is what makes the first half of that true. Do not remove it.
 #[must_use]
 pub fn select_within_capacity<Id: Copy>(
     candidates: &[SelectionCandidate<Id>],
@@ -874,9 +883,13 @@ mod tests {
         assert_eq!((-0.0f64).total_cmp(&0.0f64), std::cmp::Ordering::Less);
     }
 
-    /// A resident's contested score can never BE `-0.0`, so the signed-zero deviation above cannot
-    /// change an incumbent-versus-challenger outcome — it can only order two challengers whose scores
-    /// are both zero, where the previous behaviour was a seeded coin toss.
+    /// A resident's contested score can never BE `-0.0`.
+    ///
+    /// That is the whole of what this test proves, and it is narrower than it first appears: the
+    /// signed-zero pair needs only ONE side to be `-0.0`, and a challenger carries its score through
+    /// unshifted, so an incumbent-versus-challenger signed-zero comparison DOES arise. What makes it
+    /// harmless is the incumbent-before-challenger tiebreak, not this property — the resident's
+    /// `+0.0` sorts first under `total_cmp`, landing where that tiebreak already put it.
     ///
     /// `score + margin` with a margin at or above the floor yields `+0.0` even for the score that
     /// cancels it exactly, because IEEE-754 gives `x + (-x) = +0.0` under round-to-nearest.
