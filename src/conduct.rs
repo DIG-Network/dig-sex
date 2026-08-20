@@ -261,7 +261,7 @@ mod tests {
 
         assert_eq!(
             chatty.non_performance, 0,
-            "a peer that kept answering has not shed its penalty after {now} ticks — recovery is              being gated on how often this node observed it, not on elapsed time (SPEC §8.2A.1)"
+            "a peer that kept answering has not shed its penalty after {now} ticks: recovery is gated on observation frequency, not on elapsed time (SPEC §8.2A.1)"
         );
         assert_eq!(
             chatty.non_performance, quiet.non_performance,
