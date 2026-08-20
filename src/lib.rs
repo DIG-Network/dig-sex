@@ -102,7 +102,7 @@ pub use relevance::{
 pub use reward::{ClaimId, RecordOutcome, RewardClaim, RewardLedger};
 pub use selection::{
     may_displace, select_within_capacity, DisplacementMargin, Selection, SelectionCandidate,
-    SelectionSeed, MIN_DISPLACEMENT_MARGIN,
+    SelectionPolicy, SelectionSeed, MIN_DISPLACEMENT_MARGIN,
 };
 pub use tier::{effective_tier, evict_key, CacheEntry, CacheTier, DEFAULT_TIER};
 

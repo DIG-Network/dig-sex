@@ -10,11 +10,13 @@
 
 use dig_sex::{
     after_admission, after_eviction, decay, decide, decide_forward, dial_share,
-    in_keyspace_neighbourhood, merge_answers, observe, parse_enabled, reconcile, should_displace,
-    xor_proximity, AcquisitionDecision, BackfillPolicy, CapsuleIdentity, ConductEvidence,
-    ConductRecord, ForwardDecision, ForwardRefusal, InboundAsk, Provenance, RecursionConfig,
-    RelevanceValue, MIN_DISPLACEMENT_MARGIN, MIN_NON_PERFORMANCE_DIAL_SHARE,
-    NON_PERFORMANCE_CEILING, NON_PERFORMANCE_DECAY_TICKS, NON_PERFORMANCE_PENALTY,
+    in_keyspace_neighbourhood, may_displace, merge_answers, observe, parse_enabled, reconcile,
+    select_within_capacity, should_displace, xor_proximity, AcquisitionDecision, BackfillPolicy,
+    CacheTier, CapsuleIdentity, ConductEvidence, ConductRecord, DisplacementMargin,
+    ForwardDecision, ForwardRefusal, InboundAsk, Provenance, RecursionConfig, RelevanceValue,
+    SelectionCandidate, SelectionPolicy, SelectionSeed, MIN_DISPLACEMENT_MARGIN,
+    MIN_NON_PERFORMANCE_DIAL_SHARE, NON_PERFORMANCE_CEILING, NON_PERFORMANCE_DECAY_TICKS,
+    NON_PERFORMANCE_PENALTY,
 };
 
 use std::collections::HashSet;
@@ -90,4 +92,64 @@ fn discovery_functions_are_reachable_from_the_root() {
         merge_answers(&config, &[9u8], &[]),
         vec![(9u8, Provenance::FirstHand)]
     );
+}
+
+/// SPEC §3.2/§8.5, resolved the way a consumer resolves it: the displacement margin is reachable
+/// and IN FORCE through `select_within_capacity` — the one selection entry point — without the
+/// caller naming it.
+///
+/// This is an integration test for the same reason the file is: the defect it guards was that every
+/// piece of the defence existed and none of it was on the path a consumer walks. A unit test inside
+/// `selection` proves the rule; only this proves a consumer gets it.
+#[test]
+fn the_displacement_margin_is_in_force_through_the_root_selection_api() {
+    let contest = |challenger_score: f64| {
+        let contenders = [
+            SelectionCandidate {
+                id: b'i',
+                tier: CacheTier::Tier1Demand,
+                size_bytes: 100,
+                score: RelevanceValue(1.0),
+                pinned: false,
+                resident: true,
+            },
+            SelectionCandidate {
+                id: b'c',
+                tier: CacheTier::Tier1Demand,
+                size_bytes: 100,
+                score: RelevanceValue(challenger_score),
+                pinned: false,
+                resident: false,
+            },
+        ];
+        // The policy a consumer writes: a capacity and a node-local seed. Nothing here mentions a
+        // margin, and the margin is nonetheless applied.
+        let policy = SelectionPolicy::new(100, SelectionSeed::from_peer_id(&[7u8; 32]));
+        select_within_capacity(&contenders, policy).retained
+    };
+
+    assert_eq!(
+        contest(1.0 + MIN_DISPLACEMENT_MARGIN / 2.0),
+        vec![b'i'],
+        "a default-constructed policy must still refuse a marginal displacement"
+    );
+    assert_eq!(
+        contest(1.0 + MIN_DISPLACEMENT_MARGIN * 2.0),
+        vec![b'c'],
+        "and must still admit a challenger that clears the margin"
+    );
+
+    // The margin can be raised and never lowered, through the type a consumer configures.
+    assert_eq!(
+        SelectionPolicy::new(100, SelectionSeed::from_node_local(1))
+            .with_margin(DisplacementMargin::new(0.0))
+            .margin()
+            .get(),
+        MIN_DISPLACEMENT_MARGIN
+    );
+    assert!(may_displace(
+        RelevanceValue(0.0),
+        RelevanceValue(1.0),
+        DisplacementMargin::default()
+    ));
 }

@@ -36,7 +36,9 @@ use std::sync::Arc;
 use dig_store_cache::{CapsuleIdentity, EvictionContext, EvictionEntry, EvictionPolicy};
 
 use crate::algorithm::AlgorithmSet;
-use crate::selection::{select_within_capacity, SelectionCandidate, SelectionSeed};
+use crate::selection::{
+    select_within_capacity, DisplacementMargin, SelectionCandidate, SelectionPolicy, SelectionSeed,
+};
 
 /// Eviction driven by the tier ladder and the mirror-count objective.
 ///
@@ -45,13 +47,29 @@ use crate::selection::{select_within_capacity, SelectionCandidate, SelectionSeed
 pub struct TieredPolicy {
     algorithms: Arc<AlgorithmSet<CapsuleIdentity>>,
     seed: SelectionSeed,
+    margin: DisplacementMargin,
 }
 
 impl TieredPolicy {
-    /// Build a policy over a composed algorithm set and a node-local seed.
+    /// Build a policy over a composed algorithm set and a node-local seed, with the displacement
+    /// margin at SPEC §9's default.
     #[must_use]
     pub fn new(algorithms: Arc<AlgorithmSet<CapsuleIdentity>>, seed: SelectionSeed) -> Self {
-        Self { algorithms, seed }
+        Self {
+            algorithms,
+            seed,
+            margin: DisplacementMargin::default(),
+        }
+    }
+
+    /// Raise the displacement margin this policy selects under.
+    ///
+    /// It is carried for the caller that shares one configured margin across every selection this
+    /// node runs. **At this seam it cannot change an outcome** — see [`Self::candidate`] for why —
+    /// so raising it here is about keeping one configured value, not about tightening eviction.
+    #[must_use]
+    pub fn with_margin(self, margin: DisplacementMargin) -> Self {
+        Self { margin, ..self }
     }
 
     /// The capacity the incumbents are selected against: total capacity less the capsule being
@@ -63,6 +81,17 @@ impl TieredPolicy {
 
     /// Turn a cache entry into a selection candidate. `entry.last_access` is deliberately dropped —
     /// see the module docs (SPEC §7.3).
+    ///
+    /// **Every entry here is `resident`, and that makes the displacement margin inert at this seam**
+    /// (SPEC §3.2). `EvictionContext` describes the incoming capsule by `incoming_size` alone — it
+    /// carries no identity and no score — so the challenger is not a candidate and there is no
+    /// incumbent-versus-challenger comparison for a margin to gate. Discounting a uniformly resident
+    /// set discounts nothing.
+    ///
+    /// That is a property of the seam `dig-store-cache` owns, not a decision taken here, and it is
+    /// why hysteresis has to be applied by the caller BEFORE it asks the cache to admit anything.
+    /// Marking these entries resident is what makes the value honest if that context ever grows the
+    /// challenger's facts.
     fn candidate(&self, entry: &EvictionEntry) -> SelectionCandidate<CapsuleIdentity> {
         let facts = self.algorithms.facts_or_default(&entry.id);
         SelectionCandidate {
@@ -71,6 +100,7 @@ impl TieredPolicy {
             size_bytes: entry.size,
             score: facts.score,
             pinned: entry.pinned,
+            resident: true,
         }
     }
 }
@@ -91,7 +121,9 @@ impl EvictionPolicy for TieredPolicy {
             return Vec::new();
         }
         let candidates: Vec<_> = ctx.entries.iter().map(|e| self.candidate(e)).collect();
-        select_within_capacity(&candidates, Self::incumbent_capacity(ctx), self.seed).rejected
+        let policy =
+            SelectionPolicy::new(Self::incumbent_capacity(ctx), self.seed).with_margin(self.margin);
+        select_within_capacity(&candidates, policy).rejected
     }
 }
 

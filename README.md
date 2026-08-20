@@ -114,27 +114,46 @@ to whatever the others say. No second mechanism, no private state.
 ## Selection
 
 ```rust
-use dig_sex::{select_within_capacity, CacheTier, RelevanceValue, SelectionCandidate, SelectionSeed};
+use dig_sex::{
+    select_within_capacity, CacheTier, RelevanceValue, SelectionCandidate, SelectionPolicy,
+    SelectionSeed,
+};
 
 let candidates = vec![SelectionCandidate {
     id: capsule_id,
     tier: CacheTier::Tier1Demand,
     size_bytes: 4_000_000,
     score: RelevanceValue(0.71),
-    pinned: false, // a pin is retained unconditionally and MAY exceed capacity
+    pinned: false,   // a pin is retained unconditionally and MAY exceed capacity
+    resident: false, // answer this from the CACHE — it is what the displacement margin is measured against
 }];
 
 // The seed must be node-local and NOT derivable by a peer, or a peer could arrange to win
 // every tie on every node at once.
 let seed = SelectionSeed::from_peer_id(&own_peer_id);
 
-let outcome = select_within_capacity(&candidates, capacity_bytes, seed);
+let outcome = select_within_capacity(&candidates, SelectionPolicy::new(capacity_bytes, seed));
 outcome.retained; // highest tier first, then smallest first within a tier
 outcome.rejected; // in EVICTION order — the first entry is sacrificed first
 ```
 
 `rejected` is selection order reversed, so the two answers are consistent by construction rather
 than by a second sort that could drift.
+
+### The displacement margin is on, and you cannot turn it off
+
+`SelectionPolicy::new` installs `MIN_DISPLACEMENT_MARGIN`, and `with_margin` can only **raise** it —
+`DisplacementMargin` floors whatever it is given, including zero, a negative and NaN. A candidate that
+is not `resident` must beat a resident one by more than the margin to take its place, or two near-equal
+stores evict each other on every pass and a peer who can influence the candidate set gets to spend your
+disk bandwidth for free (SPEC §3.2, §8.5).
+
+That makes `resident` the field worth getting right. Answering it `false` for everything compiles, runs,
+and quietly returns you to the churn the margin exists to stop — so read it from the cache, not from
+where the candidate came from.
+
+The margin governs the **score** comparison only. A smaller candidate still displaces a larger incumbent,
+because holding more mirrors is the objective rather than churn.
 
 `SelectionSeed::from_node_local(value)` exists for the window before a node knows its own peer id.
 Be aware of what it costs: in that window the relevance score is a function of a `peer_id` that does

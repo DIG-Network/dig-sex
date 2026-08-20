@@ -295,6 +295,42 @@ A fresh candidate MUST NOT displace an incumbent on a marginally higher score; i
 incumbent by a configured **margin**. Without one, two near-equal stores evict each other repeatedly,
 spending bandwidth on churn that produces no net change in what is held.
 
+The margin is a **strict** threshold: a challenger scoring exactly `incumbent + margin` has not cleared
+it and MUST NOT displace.
+
+**The comparison MUST be evaluated as `challenger > incumbent + margin`**, and MUST NOT be evaluated as
+the algebraically-equal `challenger - margin > incumbent`. The two are identical in real arithmetic and
+NOT identical in IEEE-754, and every disagreement between them is in the **fail-open** direction: the
+subtracted form displaces where the rule says hold.
+
+The rate is quoted with its method, because it is a property of the sample rather than of the defect:
+124 of 512 sampled exact-boundary triples (24%) at `margin = 0.1` over pseudo-random incumbents in
+`[0, 1)`. A different margin or range gives a materially different figure. What is invariant is the
+direction.
+
+Two implementations each picking a form would therefore disagree about the same triple, and an attacker
+working the boundary would obtain displacement for free against the defence §8.5 names as primary.
+Every path that decides a displacement MUST evaluate the one form, so that agreement between them is
+exact by construction rather than by an identity floating point does not honour.
+
+**Score comparison MUST be a total order.** A score is carried as a floating-point value, so an
+implementation MUST NOT resolve an unordered comparison to "equal": that yields an inconsistent
+ordering, which a sort is entitled to reject, turning a constructible input into a failure of the
+selection path rather than a degraded ranking. A NaN-scored candidate MUST be ranked and MUST still
+appear in exactly one of the retained or rejected sets.
+
+**Incumbency MUST be an input to selection.** The rule is a comparison between something already held
+and something not, so a selection pass that cannot tell the two apart cannot apply the margin whatever
+value it is given. An implementation MUST therefore carry, per candidate, whether it is currently held,
+and that fact MUST be derived from this node's own storage — never from a peer's claim.
+
+The margin governs the **score** dimension only, which is the one this section names. It MUST NOT gate
+the size dimension: a smaller challenger displacing a larger incumbent raises the number of mirrors
+held, which is the objective of §4.1 rather than churn.
+
+**The margin MUST be in force on the default path.** An entry point that selects without it, or a
+constructor that omits it, makes the defence of §8.5 opt-in and MUST NOT exist.
+
 ---
 
 ## 4. Selection
@@ -594,7 +630,15 @@ MUST be bounded before the work is done, not after.
 
 **Cache thrashing is a denial vector, not only an inefficiency.** A peer that can drive admission and
 eviction in a loop spends this node's disk bandwidth indefinitely while producing no net change in what is
-held. The displacement margin (§3.2) is the primary defence and MUST NOT be configurable to zero.
+held. The displacement margin (§3.2) is the primary defence, MUST NOT be configurable to zero, and MUST be
+applied by the selection entry point a consumer calls rather than by a helper it has to seek out.
+
+**Where the defence applies, stated precisely.** Hysteresis needs both the incumbent and the challenger in
+view, so it is applied where a selection pass ranks them against each other. It is consequently **inert at
+an eviction seam whose context describes the incoming capsule by size alone**: with no challenger score to
+compare, there is no displacement decision for a margin to gate, and every candidate in such a pass is an
+incumbent. An implementation MUST NOT present such a seam as enforcing this defence, and a caller of one
+MUST apply the margin **before** asking the cache to admit anything.
 
 **The reputation system is itself an attack surface** (§8.2A): if degrading a competitor costs an attacker
 less than serving content, it has become the cheapest available attack rather than a defence.
@@ -611,7 +655,7 @@ the **safe** setting, never the permissive one.
 | total disk allocation | implementation-defined, documented | reject, do not guess |
 | read-triggered whole-capsule acquisition (§5.1) | **ON** | ON — it spends only this node's disk |
 | recursive discovery on inbound miss (§6.1) | **OFF** | **OFF** — it spends other nodes' bandwidth |
-| displacement margin (§3.2) | implementation-defined, documented | reject |
+| displacement margin (§3.2) | **`MIN_DISPLACEMENT_MARGIN`** (0.01) | raise to the floor |
 
 The asymmetry between the two behavioural defaults is deliberate and MUST be preserved: one is local and
 bounded, the other recruits third parties.
@@ -720,24 +764,39 @@ impl SelectionSeed {
 }
 
 pub struct SelectionCandidate<Id> { pub id: Id, pub tier: CacheTier, pub size_bytes: u64,
-                                    pub score: RelevanceValue, pub pinned: bool }
+                                    pub score: RelevanceValue, pub pinned: bool,
+                                    pub resident: bool }
 pub struct Selection<Id> { pub retained: Vec<Id>, pub rejected: Vec<Id> }
-
-pub fn select_within_capacity<Id: Copy>(candidates: &[SelectionCandidate<Id>],
-                                        capacity_bytes: u64,
-                                        seed: SelectionSeed) -> Selection<Id>;
 
 pub const MIN_DISPLACEMENT_MARGIN: f64;
 pub struct DisplacementMargin(/* private */);
 impl DisplacementMargin { pub fn new(requested: f64) -> Self; pub fn get(self) -> f64; }
+impl Default for DisplacementMargin;               // MIN_DISPLACEMENT_MARGIN
 pub fn may_displace(incumbent: RelevanceValue, candidate: RelevanceValue,
                     margin: DisplacementMargin) -> bool;
+
+pub struct SelectionPolicy(/* private */);
+impl SelectionPolicy {
+    pub fn new(capacity_bytes: u64, seed: SelectionSeed) -> Self;   // margin at the floor
+    pub fn with_margin(self, margin: DisplacementMargin) -> Self;   // raises only
+    pub fn capacity_bytes(self) -> u64;
+    pub fn seed(self) -> SelectionSeed;
+    pub fn margin(self) -> DisplacementMargin;
+}
+
+pub fn select_within_capacity<Id: Copy>(candidates: &[SelectionCandidate<Id>],
+                                        policy: SelectionPolicy) -> Selection<Id>;
 ```
 
 `SelectionSeed`'s field is private and both constructors name a node-local source: a peer-supplied value
 cannot reach the tiebreak by accident (§4.4). `Selection::rejected` is returned in **eviction order**
 (lowest tier first), so it can be handed straight to eviction without a second sort that could drift.
 `DisplacementMargin` floors in its **constructor**, so no call site can hold a zero margin (§8.5).
+`SelectionPolicy` carries that margin and there is no constructor without one, so **every** call to
+`select_within_capacity` selects under hysteresis — the margin is not a parameter a caller can decline
+to pass (§3.2). Its fields are private and reached through `new`, so a later policy input is an
+additive method rather than another signature change. `SelectionCandidate::resident` is what the margin
+is measured against, and it is a fact about this node's own storage, never a peer's claim (§8.1).
 
 ### 11A.4 The algorithm seam — `algorithm`
 
@@ -959,7 +1018,8 @@ An implementation conforms when:
     idempotent on replay, biased toward under-counting, and supplied to the decision core as an input
     rather than read by it (§2A);
 7. every peer-influenced score input is bounded and clamped (§3.1);
-8. displacement requires a margin (§3.2);
+8. displacement requires a margin, applied by the selection entry point a consumer calls, measured
+   against a per-candidate incumbency input, and impossible to omit or disable (§3.2);
 9. within-tier selection maximises the COUNT of stores against residual capacity and is not
    sort-by-score-and-fill (§4.1);
 10. pinned entries are never evicted and may exceed the allocation (§4.2);
@@ -985,7 +1045,7 @@ An implementation conforms when:
 19a. every peer-triggered path is admitted before the work is done, metered by AUTHENTICATED identity
      rather than a caller-supplied or placeholder one, and no single peer can consume the whole dial
      budget, cache, or concurrency (§8.5);
-19b. the displacement margin cannot be configured to zero (§8.5);
+19b. the displacement margin cannot be configured to zero, and no selection path bypasses it (§8.5);
 20. every configuration switch has a stated default and fails to the safe setting (§9);
 21. the four observability surfaces of §10 exist;
 22. no behaviour owned by a composed crate is re-implemented, and identifier types resolve to one version
