@@ -78,21 +78,31 @@ pub mod reward;
 pub mod selection;
 pub mod tier;
 
-pub use acquisition::{AcquisitionDecision, BackfillPolicy};
+// Every public item of every module is re-exported here, so SPEC §11A's "everything named here is
+// reachable from the crate root" holds by construction rather than by upkeep. Items whose bare name
+// is generic out of context — `decide`, `observe`, `decay` — remain more readable through their
+// owning module (`acquisition::decide`), which stays equally public and equally stable.
+pub use acquisition::{decide, AcquisitionDecision, BackfillPolicy};
 pub use admission::{AdmissionLimits, AdmissionMeter, AuthenticatedPeer, Refusal, WorkKind};
 pub use algorithm::{AlgorithmSet, ExchangeAlgorithm, StoreFacts};
-pub use conduct::{ConductEvidence, ConductRecord};
-pub use discovery::{ForwardDecision, ForwardRefusal, InboundAsk, Provenance, RecursionConfig};
+pub use conduct::{
+    decay, dial_share, observe, ConductEvidence, ConductRecord, MIN_NON_PERFORMANCE_DIAL_SHARE,
+    NON_PERFORMANCE_CEILING, NON_PERFORMANCE_DECAY_TICKS, NON_PERFORMANCE_PENALTY,
+};
+pub use discovery::{
+    decide_forward, merge_answers, parse_enabled, ForwardDecision, ForwardRefusal, InboundAsk,
+    Provenance, RecursionConfig,
+};
 pub use eviction::TieredPolicy;
-pub use holdings::HoldingsDelta;
+pub use holdings::{after_admission, after_eviction, reconcile, HoldingsDelta};
 pub use relevance::{
-    relevance, NodeContext, RelevanceInputs, RelevanceValue, RelevanceWeights,
-    INBOUND_DEMAND_MIN_PROXIMITY,
+    in_keyspace_neighbourhood, relevance, should_displace, xor_proximity, NodeContext,
+    RelevanceInputs, RelevanceValue, RelevanceWeights, INBOUND_DEMAND_MIN_PROXIMITY,
 };
 pub use reward::{ClaimId, RecordOutcome, RewardClaim, RewardLedger};
 pub use selection::{
     may_displace, select_within_capacity, DisplacementMargin, Selection, SelectionCandidate,
-    SelectionSeed,
+    SelectionSeed, MIN_DISPLACEMENT_MARGIN,
 };
 pub use tier::{effective_tier, evict_key, CacheEntry, CacheTier, DEFAULT_TIER};
 
