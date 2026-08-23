@@ -23,6 +23,7 @@
 //! | [`holdings`] | every eviction is also an advertising retraction |
 //! | [`reward`] | the per-store ledger of rewards claimed, which the deferred claim mechanism writes to |
 //! | [`discovery`] | recursive ask on an inbound miss, bounded and off by default |
+//! | [`routing`] | which peers that ask goes to, ranked by what THIS node has observed |
 //! | [`conduct`] | peer conduct: a malicious peer separated from a distressed honest one |
 //! | [`admission`] | inbound load admitted before the work is done, metered per authenticated peer |
 //!
@@ -75,6 +76,7 @@ pub mod eviction;
 pub mod holdings;
 pub mod relevance;
 pub mod reward;
+pub mod routing;
 pub mod selection;
 pub mod tier;
 
@@ -100,6 +102,10 @@ pub use relevance::{
     RelevanceInputs, RelevanceValue, RelevanceWeights, INBOUND_DEMAND_MIN_PROXIMITY,
 };
 pub use reward::{ClaimId, RecordOutcome, RewardClaim, RewardLedger};
+pub use routing::{
+    rank, select_fan_out, AskObservations, AskOutcome, AskRouting, PeerObservations, RoutablePeer,
+    DEFAULT_OBSERVATION_CAPACITY, LATENCY_SCALE_TICKS, QUALITY_HALF_LIFE_TICKS, UNOBSERVED_QUALITY,
+};
 pub use selection::{
     may_displace, select_within_capacity, DisplacementMargin, Selection, SelectionCandidate,
     SelectionPolicy, SelectionSeed, MIN_DISPLACEMENT_MARGIN,
