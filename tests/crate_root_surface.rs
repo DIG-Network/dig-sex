@@ -10,13 +10,14 @@
 
 use dig_sex::{
     after_admission, after_eviction, decay, decide, decide_forward, dial_share,
-    in_keyspace_neighbourhood, may_displace, merge_answers, observe, parse_enabled, reconcile,
-    select_within_capacity, should_displace, xor_proximity, AcquisitionDecision, BackfillPolicy,
-    CacheTier, CapsuleIdentity, ConductEvidence, ConductRecord, DisplacementMargin,
-    ForwardDecision, ForwardRefusal, InboundAsk, Provenance, RecursionConfig, RelevanceValue,
+    in_keyspace_neighbourhood, may_displace, merge_answers, observe, parse_enabled, rank,
+    reconcile, select_within_capacity, should_displace, xor_proximity, AcquisitionDecision,
+    AskObservations, AskRouting, BackfillPolicy, CacheTier, CapsuleIdentity, ConductEvidence,
+    ConductRecord, DisplacementMargin, ForwardDecision, ForwardRefusal, InboundAsk,
+    PeerObservations, Provenance, RecursionConfig, RelevanceValue, RoutablePeer,
     SelectionCandidate, SelectionPolicy, SelectionSeed, MIN_DISPLACEMENT_MARGIN,
     MIN_NON_PERFORMANCE_DIAL_SHARE, NON_PERFORMANCE_CEILING, NON_PERFORMANCE_DECAY_TICKS,
-    NON_PERFORMANCE_PENALTY,
+    NON_PERFORMANCE_PENALTY, UNOBSERVED_QUALITY,
 };
 
 use std::collections::HashSet;
@@ -73,6 +74,16 @@ fn conduct_surface_is_reachable_from_the_root() {
     );
 }
 
+/// A peer identified by a node-local routing key, as `RoutablePeer` requires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Node(u64);
+
+impl RoutablePeer for Node {
+    fn routing_key(&self) -> u64 {
+        self.0
+    }
+}
+
 /// The three discovery functions, including the fail-closed setting parser.
 #[test]
 fn discovery_functions_are_reachable_from_the_root() {
@@ -81,13 +92,23 @@ fn discovery_functions_are_reachable_from_the_root() {
     // Recursion defaults OFF (SPEC §6.1), so a default config refuses before reading anything else.
     let config = RecursionConfig::default();
     let ask = InboundAsk {
-        requestor: 1u8,
+        requestor: Node(1),
         hops_remaining: Some(4),
     };
+    let observations = AskObservations::<Node>::default();
+    let routing = AskRouting {
+        seed: SelectionSeed::from_peer_id(&[3u8; 32]),
+        observations: &observations,
+        now_ticks: 0,
+    };
     assert_eq!(
-        decide_forward(&config, &ask, &2u8, &[3u8], true),
+        decide_forward(&config, &ask, &Node(2), &[Node(3)], true, &routing),
         ForwardDecision::Refuse(ForwardRefusal::Disabled)
     );
+
+    // The ranking surface is reachable from the root too, and an unobserved peer scores the baseline.
+    assert_eq!(rank(&routing, &[Node(3), Node(4)]).len(), 2);
+    assert!((PeerObservations::unobserved().quality(0) - UNOBSERVED_QUALITY).abs() < f64::EPSILON);
     assert_eq!(
         merge_answers(&config, &[9u8], &[]),
         vec![(9u8, Provenance::FirstHand)]

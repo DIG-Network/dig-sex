@@ -97,6 +97,13 @@ impl SelectionSeed {
         }
         Self(mix64(value))
     }
+
+    /// The raw seed value, for the other node-local tiebreaks in this crate
+    /// ([`crate::routing`]). Crate-visible only: a seed must never leave the process, and a public
+    /// accessor would invite one being logged or advertised.
+    pub(crate) const fn raw(self) -> u64 {
+        self.0
+    }
 }
 
 /// The smallest displacement margin this crate will honour (SPEC §3.2, §8.5), and the default one.
@@ -411,7 +418,7 @@ fn tiebreak(seed: SelectionSeed, index: usize) -> u64 {
 /// SplitMix64's finalizer — a well-known avalanche mix. Used instead of a `rand` dependency because
 /// the requirement here is a DETERMINISTIC, replayable permutation from an explicit seed, which is
 /// exactly what a mixing function gives and what a generator carrying hidden state does not.
-const fn mix64(mut x: u64) -> u64 {
+pub(crate) const fn mix64(mut x: u64) -> u64 {
     x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
     x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);

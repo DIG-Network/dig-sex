@@ -23,6 +23,13 @@
 //! A disabled node forwards **nothing**, including relaying for others. The switch cuts the chain at
 //! every disabled node, not only at originators.
 //!
+//! # Whom the ask goes to is a DECISION, not the order the pool arrived in
+//!
+//! The `fan_out` peers are chosen by [`crate::routing`], which ranks them by what this node has
+//! observed of their answers and reserves one slot for a peer it has never observed. Taking a prefix
+//! of the caller's slice instead would concentrate every forwarded ask on a fixed arbitrary handful,
+//! because the pool reaches this crate from a `HashMap`.
+//!
 //! # Answers from a hop are HEARSAY
 //!
 //! They are candidates for the **fetch** path, where verification makes a wrong candidate merely
@@ -37,6 +44,8 @@
 //! is free to log what it was asked — and the disclosure happens on a MISS, precisely when the
 //! requestor has not yet decided to contact any holder. It is therefore not a disclosure a completed
 //! direct read would have made anyway.
+
+use crate::routing::{select_fan_out, AskRouting, RoutablePeer};
 
 /// Where an answer came from, and therefore how much this node may assert about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,13 +150,19 @@ pub enum ForwardDecision<Peer> {
 /// `relay_budget_available` is the caller's separate allowance for work done on OTHERS' behalf. It is
 /// distinct from this node's own request budget on purpose: billing a hop's fan-out to the hop's own
 /// allowance lets one admitted request spend a victim's budget across every peer it holds.
+///
+/// `routing` supplies the order. **The peers are chosen by
+/// [`select_fan_out`](crate::routing::select_fan_out), never by taking a prefix of `known_peers`**:
+/// the pool arrives from a `HashMap`, so a prefix is a fixed arbitrary sample and the same few peers
+/// would absorb every forwarded ask for the life of the process (SPEC §6.1.2).
 #[must_use]
-pub fn decide_forward<Peer: Copy + PartialEq>(
+pub fn decide_forward<Peer: RoutablePeer>(
     config: &RecursionConfig,
     ask: &InboundAsk<Peer>,
     this_node: &Peer,
     known_peers: &[Peer],
     relay_budget_available: bool,
+    routing: &AskRouting<'_, Peer>,
 ) -> ForwardDecision<Peer> {
     if !config.enabled {
         return ForwardDecision::Refuse(ForwardRefusal::Disabled);
@@ -162,12 +177,12 @@ pub fn decide_forward<Peer: Copy + PartialEq>(
         return ForwardDecision::Refuse(ForwardRefusal::RelayBudgetSpent);
     }
 
-    let peers: Vec<Peer> = known_peers
+    let eligible: Vec<Peer> = known_peers
         .iter()
         .filter(|peer| **peer != ask.requestor && **peer != *this_node)
-        .take(config.fan_out as usize)
         .copied()
         .collect();
+    let peers = select_fan_out(routing, &eligible, config.fan_out as usize);
 
     if peers.is_empty() {
         return ForwardDecision::Refuse(ForwardRefusal::NoEligiblePeers);
@@ -205,6 +220,34 @@ pub fn merge_answers<Answer: Copy>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::routing::{AskObservations, AskOutcome};
+    use crate::selection::SelectionSeed;
+
+    /// A test peer whose routing key is its id, so a fixture can be read at a glance.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct P(u64);
+
+    impl RoutablePeer for P {
+        fn routing_key(&self) -> u64 {
+            self.0
+        }
+    }
+
+    fn pool(ids: &[u64]) -> Vec<P> {
+        ids.iter().copied().map(P).collect()
+    }
+
+    fn unobserved() -> AskObservations<P> {
+        AskObservations::with_capacity(64)
+    }
+
+    fn routing<'a>(observations: &'a AskObservations<P>) -> AskRouting<'a, P> {
+        AskRouting {
+            seed: SelectionSeed::from_peer_id(&[7u8; 32]),
+            observations,
+            now_ticks: 100,
+        }
+    }
 
     fn enabled() -> RecursionConfig {
         RecursionConfig {
@@ -213,9 +256,9 @@ mod tests {
         }
     }
 
-    fn ask(requestor: u8, hops_remaining: Option<u8>) -> InboundAsk<u8> {
+    fn ask(requestor: u64, hops_remaining: Option<u8>) -> InboundAsk<P> {
         InboundAsk {
-            requestor,
+            requestor: P(requestor),
             hops_remaining,
         }
     }
@@ -241,9 +284,10 @@ mod tests {
         let decision = decide_forward(
             &RecursionConfig::default(),
             &ask(1, Some(2)),
-            &0,
-            &[2, 3, 4],
+            &P(0),
+            &pool(&[2, 3, 4]),
             true,
+            &routing(&unobserved()),
         );
         assert_eq!(decision, ForwardDecision::Refuse(ForwardRefusal::Disabled));
     }
@@ -253,7 +297,14 @@ mod tests {
     #[test]
     fn an_unreadable_hop_budget_refuses_rather_than_forwarding() {
         assert_eq!(
-            decide_forward(&enabled(), &ask(1, None), &0, &[2, 3, 4], true),
+            decide_forward(
+                &enabled(),
+                &ask(1, None),
+                &P(0),
+                &pool(&[2, 3, 4]),
+                true,
+                &routing(&unobserved())
+            ),
             ForwardDecision::Refuse(ForwardRefusal::UnreadableHopBudget)
         );
     }
@@ -263,13 +314,25 @@ mod tests {
     #[test]
     fn the_hop_budget_is_honoured_on_receipt_and_decremented_on_send() {
         assert_eq!(
-            decide_forward(&enabled(), &ask(1, Some(0)), &0, &[2, 3], true),
+            decide_forward(
+                &enabled(),
+                &ask(1, Some(0)),
+                &P(0),
+                &pool(&[2, 3]),
+                true,
+                &routing(&unobserved())
+            ),
             ForwardDecision::Refuse(ForwardRefusal::HopBudgetSpent)
         );
 
-        let ForwardDecision::Forward { hops_remaining, .. } =
-            decide_forward(&enabled(), &ask(1, Some(2)), &0, &[2, 3], true)
-        else {
+        let ForwardDecision::Forward { hops_remaining, .. } = decide_forward(
+            &enabled(),
+            &ask(1, Some(2)),
+            &P(0),
+            &pool(&[2, 3]),
+            true,
+            &routing(&unobserved()),
+        ) else {
             panic!("expected a forward");
         };
         assert_eq!(hops_remaining, 1);
@@ -280,12 +343,21 @@ mod tests {
     /// single-exclusion test.
     #[test]
     fn the_requestor_and_this_node_are_excluded_from_the_fan_out() {
-        let ForwardDecision::Forward { peers, .. } =
-            decide_forward(&enabled(), &ask(1, Some(2)), &0, &[0, 1, 2, 3], true)
-        else {
+        let ForwardDecision::Forward { peers, .. } = decide_forward(
+            &enabled(),
+            &ask(1, Some(2)),
+            &P(0),
+            &pool(&[0, 1, 2, 3]),
+            true,
+            &routing(&unobserved()),
+        ) else {
             panic!("expected a forward");
         };
-        assert_eq!(peers, vec![2, 3]);
+        assert_eq!(peers.len(), 2, "{peers:?}");
+        assert!(
+            !peers.contains(&P(0)) && !peers.contains(&P(1)),
+            "{peers:?}"
+        );
     }
 
     /// SPEC §6.1.2: the fan-out bounds how many peers one miss recruits per hop.
@@ -295,12 +367,91 @@ mod tests {
             fan_out: 2,
             ..enabled()
         };
-        let ForwardDecision::Forward { peers, .. } =
-            decide_forward(&config, &ask(9, Some(2)), &0, &[1, 2, 3, 4, 5], true)
-        else {
+        let ForwardDecision::Forward { peers, .. } = decide_forward(
+            &config,
+            &ask(9, Some(2)),
+            &P(0),
+            &pool(&[1, 2, 3, 4, 5]),
+            true,
+            &routing(&unobserved()),
+        ) else {
             panic!("expected a forward");
         };
         assert_eq!(peers.len(), 2);
+    }
+
+    /// **The defect this ranking replaced.** The pool reaches `decide_forward` from a `HashMap`, so
+    /// the slice order is arbitrary but STABLE for a given map instance — a prefix is therefore a
+    /// fixed arbitrary sample, and the same three peers absorb every forwarded ask for the life of
+    /// the process while the rest of the pool is never asked at all.
+    ///
+    /// The fixture feeds the SAME pool in several orders, which is what a differently-seeded
+    /// `HashMap` produces, and requires the slate to be identical every time. A prefix cannot satisfy
+    /// that: it returns whatever the arbitrary order handed it. A control asserts the pool really is
+    /// large enough for the choice to matter, so the test cannot pass vacuously on a pool of three.
+    #[test]
+    fn the_slate_is_ranked_not_the_arbitrary_prefix_of_the_pool() {
+        let observations = unobserved();
+        let orders = [
+            pool(&[2, 3, 4, 5, 6, 7, 8, 9]),
+            pool(&[9, 8, 7, 6, 5, 4, 3, 2]),
+            pool(&[5, 9, 2, 7, 4, 8, 3, 6]),
+        ];
+        assert!(orders[0].len() > usize::from(enabled().fan_out) * 2);
+
+        let slates: Vec<Vec<P>> = orders
+            .iter()
+            .map(|order| {
+                let ForwardDecision::Forward { peers, .. } = decide_forward(
+                    &enabled(),
+                    &ask(1, Some(2)),
+                    &P(0),
+                    order,
+                    true,
+                    &routing(&observations),
+                ) else {
+                    panic!("expected a forward");
+                };
+                peers
+            })
+            .collect();
+
+        assert_eq!(slates[0], slates[1], "the slate followed the input order");
+        assert_eq!(slates[0], slates[2], "the slate followed the input order");
+        assert_ne!(
+            slates[0],
+            orders[0][..3].to_vec(),
+            "the slate is still the arbitrary prefix"
+        );
+    }
+
+    /// A peer this node has observed answering conclusively must reach the slate even when the
+    /// arbitrary pool order buries it at the end — which is the routing-quality half of the defect.
+    /// One good peer among many unobserved ones is the fixture that distinguishes "ranked" from
+    /// "shuffled": a shuffle would place it in the slate only by chance.
+    #[test]
+    fn an_observed_good_answerer_reaches_the_slate_from_the_back_of_the_pool() {
+        let mut observations = unobserved();
+        observations.record(P(9), AskOutcome::Conclusive, 1, 100);
+
+        let ForwardDecision::Forward { peers, .. } = decide_forward(
+            &enabled(),
+            &ask(1, Some(2)),
+            &P(0),
+            &pool(&[2, 3, 4, 5, 6, 7, 8, 9]),
+            true,
+            &routing(&observations),
+        ) else {
+            panic!("expected a forward");
+        };
+
+        assert!(peers.contains(&P(9)), "{peers:?}");
+        assert!(
+            peers
+                .iter()
+                .any(|peer| observations.of(peer).is_unobserved()),
+            "the exploration slot must survive into decide_forward: {peers:?}"
+        );
     }
 
     /// SPEC §6.1.2/§6.2: the real per-request cost is an exponent and is stated, not left implicit.
@@ -323,7 +474,14 @@ mod tests {
     #[test]
     fn relayed_work_is_refused_when_the_separate_relay_budget_is_spent() {
         assert_eq!(
-            decide_forward(&enabled(), &ask(1, Some(2)), &0, &[2, 3], false),
+            decide_forward(
+                &enabled(),
+                &ask(1, Some(2)),
+                &P(0),
+                &pool(&[2, 3]),
+                false,
+                &routing(&unobserved())
+            ),
             ForwardDecision::Refuse(ForwardRefusal::RelayBudgetSpent)
         );
     }

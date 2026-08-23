@@ -435,6 +435,41 @@ Requirements, each earned by a shipped implementation:
    recruit hundreds of nodes. The real per-request cost MUST be documented, and a **concurrency ceiling
    MUST NOT be described as bounding the aggregate** — it bounds how many happen at once, not how many
    happen.
+
+   **The `fan_out` peers MUST be RANKED, never a prefix of the caller's candidate slice.** A connected
+   pool is customarily held in a hash map, whose iteration order is arbitrary **but stable for a given
+   map instance**; a prefix of it is therefore not a sample but a *fixed arbitrary* choice, and the same
+   handful of peers absorb every forwarded ask for the life of the process while the rest of the pool is
+   never asked at all.
+
+   The ranking MUST satisfy all five of the following.
+
+   1. **Locally observed only.** The only admissible input is evidence this node gathered from its own
+      completed exchanges — whether a peer answered, whether the answer was conclusive, how fast, and
+      how recently. **No value a peer supplies may enter the ranking**, and the implementation MUST make
+      that structural: the observation type MUST expose no constructor from a decoded message. A peer
+      able to claim quality or novelty can attract every ask to itself, which is an eclipse of the
+      recursive path; the requirement is that no such channel exists, not that claims are discounted.
+   2. **Recency-weighted, decaying toward the unobserved baseline** — never toward zero. A score that
+      decayed toward zero converts an old observation into a permanent exclusion, and a peer that is
+      never asked can never demonstrate recovery (§8.2A). An honest absence MUST rank above silence.
+   3. **A deterministic tie-break that does not depend on candidate order.** Otherwise ties fall back on
+      the arbitrary order and reintroduce this defect in a subtler form. The tie-break MUST be derived
+      from the node-local selection seed (§4.4) mixed with the peer's **routing identity**, which MUST
+      be the verified session identity this node computed — never a value read from a message.
+   4. **One `fan_out` slot MUST be reserved for a peer this node has never observed**, whenever
+      `fan_out >= 2` and such a peer is available. Without it the ranking self-locks onto whichever
+      peers answered first, which is load concentration again. At `fan_out == 1` there is no slot to
+      spare and the single ask goes to the best-ranked peer.
+   5. **Bounded, and pool-scoped rather than TTL-scoped.** Observations are keyed only by peers
+      presently in the connected pool and MUST be dropped when the pool drops them; pool membership is
+      the liveness gate, so a cycled peer leaves the candidate set with no timer to get wrong. An
+      explicit capacity ceiling with least-recently-observed eviction MUST hold anyway, so the bound
+      survives a caller that forgets (§8.4).
+
+   The ranking is **node-local state**. It MUST NOT be advertised, gossiped, or persisted across a
+   restart, for the same reason conduct may not be (§8.2A): an exported assessment of a third party is a
+   defamation primitive, and an imported one is unverifiable.
 3. **OFF by default.** A path spending *other* nodes' bandwidth MUST NOT be gated more loosely than one
    spending only this node's. An unrecognised configuration value MUST **fail closed**, so a typo cannot
    enable a network-wide amplifier.
@@ -910,9 +945,10 @@ pub enum ForwardRefusal { Disabled, HopBudgetSpent, UnreadableHopBudget,
 pub enum ForwardDecision<Peer> { Forward { peers: Vec<Peer>, hops_remaining: u8 },
                                  Refuse(ForwardRefusal) }
 
-pub fn decide_forward<Peer: Copy + PartialEq>(config: &RecursionConfig, ask: &InboundAsk<Peer>,
-                                              this_node: &Peer, known_peers: &[Peer],
-                                              relay_budget_available: bool) -> ForwardDecision<Peer>;
+pub fn decide_forward<Peer: RoutablePeer>(config: &RecursionConfig, ask: &InboundAsk<Peer>,
+                                          this_node: &Peer, known_peers: &[Peer],
+                                          relay_budget_available: bool,
+                                          routing: &AskRouting<'_, Peer>) -> ForwardDecision<Peer>;
 
 pub fn merge_answers<Answer: Copy>(config: &RecursionConfig, first_hand: &[Answer],
                                    hearsay: &[Answer]) -> Vec<(Answer, Provenance)>;
@@ -921,7 +957,51 @@ pub fn merge_answers<Answer: Copy>(config: &RecursionConfig, first_hand: &[Answe
 `hops_remaining: Option<u8>` makes an unreadable budget representable, which is what lets §6.1.1's refusal
 be expressed at all. `worst_case_nodes_recruited` is also the **disclosure radius** (§6.2).
 `max_hearsay_answers` caps only the forwarded portion, so a flood cannot evict a first-hand answer
-(§6.1.6).
+(§6.1.6). `routing` carries the ranking (§11A.9a): `decide_forward` filters the candidates by §6.1.7 and
+then hands them to `select_fan_out`, so a prefix of `known_peers` can never become the slate.
+
+### 11A.9a Ask routing — `routing`
+
+```rust
+pub const UNOBSERVED_QUALITY: f64;              // 0.5 — the score of a peer never observed
+pub const QUALITY_HALF_LIFE_TICKS: u64;
+pub const LATENCY_SCALE_TICKS: u64;
+pub const DEFAULT_OBSERVATION_CAPACITY: usize;
+
+pub enum AskOutcome { Conclusive, Inconclusive, Silent }
+
+pub trait RoutablePeer: Copy + PartialEq { fn routing_key(&self) -> u64; }
+
+pub struct PeerObservations { /* private */ }
+impl PeerObservations {
+    pub const fn unobserved() -> Self;          // the ONLY public constructor
+    pub const fn is_unobserved(&self) -> bool;
+    pub const fn asks(&self) -> u32;
+    pub fn quality(&self, now_ticks: u64) -> f64;
+}
+
+pub struct AskObservations<Peer> { /* private */ }
+impl<Peer: RoutablePeer> AskObservations<Peer> {
+    pub fn with_capacity(capacity: usize) -> Self;
+    pub fn record(&mut self, peer: Peer, outcome: AskOutcome, latency_ticks: u64, now_ticks: u64);
+    pub fn retain(&mut self, pool: &[Peer]);
+    pub fn of(&self, peer: &Peer) -> PeerObservations;
+    pub fn len(&self) -> usize;
+    pub fn is_empty(&self) -> bool;
+}
+
+pub struct AskRouting<'a, Peer> { pub seed: SelectionSeed, pub observations: &'a AskObservations<Peer>,
+                                  pub now_ticks: u64 }
+
+pub fn rank<Peer: RoutablePeer>(routing: &AskRouting<'_, Peer>, candidates: &[Peer]) -> Vec<Peer>;
+pub fn select_fan_out<Peer: RoutablePeer>(routing: &AskRouting<'_, Peer>, candidates: &[Peer],
+                                          fan_out: usize) -> Vec<Peer>;
+```
+
+`PeerObservations` has **no constructor from a wire-shaped value and no deserialization derive**, which
+is how §6.1.2's "locally observed only" is enforced rather than asserted. `AskObservations::record`
+takes an outcome the caller observed itself; `retain` is the pool-scoped bound. `routing_key` MUST be
+derived from the verified session identity (§6.1.2, rule 3).
 
 ### 11A.10 Peer conduct — `conduct`
 
